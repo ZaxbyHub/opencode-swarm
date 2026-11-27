@@ -44,7 +44,7 @@ const dir = process.env.SWARM_MP_DIR;
 const cid = process.env.SWARM_MP_CID;
 const ops = Number(process.env.SWARM_MP_OPS);
 for (let i = 0; i < ops; i++) {
-	await store.updateSnapshot(dir, cid, { lastCheckedAt: Date.now(), errorCount: i });
+	await store.updateSnapshot(dir, cid, { lastCheckedAt: Date.now(), errorCount: i + 1 });
 }
 process.exit(0);
 `;
@@ -144,11 +144,15 @@ describe('pr-subscriptions multi-process serialization', () => {
 				})();
 
 				// Parent writes concurrently — both processes contend on the same
-				// cross-process evidence-lock sentinel.
+				// cross-process evidence-lock sentinel. Every parent iteration
+				// writes a DISTINCT mergeableState value: a repeated identical
+				// value within the same millisecond is a legitimate no-op in the
+				// production store (snapshotUpdateHasChanges), which does not
+				// persist and does not bump the sequence.
 				for (let i = 0; i < PARENT_OPS; i++) {
 					await updateSnapshot(dir, cid, {
 						lastCheckedAt: Date.now(),
-						mergeableState: 'clean',
+						mergeableState: `parent-${i}`,
 					});
 				}
 
@@ -328,4 +332,121 @@ describe('pr-subscriptions multi-process serialization', () => {
 		// timeout (bounded by the 5s bootstrap timeout).
 		expect(elapsed).toBeLessThan(30_000);
 	}, 60_000);
+});
+
+describe('no-op update semantics — deterministic proof for the sequence assertion (r16)', () => {
+	// The multiprocess test above asserts
+	// sequence >= before + CHILD_OPS + PARENT_OPS, i.e. that EVERY one of the
+	// 30 updateSnapshot calls persists. That assertion is only valid when
+	// every call actually CHANGES a mutable value: the production store's
+	// snapshotUpdateHasChanges() deliberately skips persisting (and sequence
+	// bumping) for updates that change nothing — e.g. a repeated
+	// mergeableState: 'clean' whose lastCheckedAt lands in the same
+	// millisecond as the previous write. The r16 audit traced the historical
+	// "Expected: >= 31, Received: 29/30" flake to exactly such no-ops, NOT to
+	// a cross-process lock race. These frozen-clock tests pin the production
+	// semantics the corrected test inputs rely on.
+	let dir: string;
+	beforeEach(() => {
+		dir = makeTempProject();
+	});
+	afterEach(() => {
+		closeAllProjectDbs();
+		fs.rmSync(dir, { recursive: true, force: true });
+	});
+
+	test('an identical repeated update under a frozen clock is a no-op (sequence unchanged)', async () => {
+		await subscribe(dir, {
+			sessionID: 'sess_mp',
+			prNumber: 1,
+			repoFullName: 'o/r',
+			prUrl: 'https://github.com/o/r/pull/1',
+		});
+		const restore = freezeClock({ fixedNow: 1_700_000_000_000 });
+		try {
+			const seqBefore = JSON.parse(
+				fs.readFileSync(checkpointPath(dir), 'utf-8'),
+			).sequence as number;
+			// First write changes mergeableState (undefined → 'clean').
+			await updateSnapshot(dir, 'sess_mp::o/r::1', {
+				lastCheckedAt: 1_700_000_000_000,
+				mergeableState: 'clean',
+			});
+			const seqAfterFirst = JSON.parse(
+				fs.readFileSync(checkpointPath(dir), 'utf-8'),
+			).sequence as number;
+			expect(seqAfterFirst).toBe(seqBefore + 1);
+
+			// Identical repeat: same lastCheckedAt (frozen clock — the same-ms
+			// case the flaky loop hit on a real clock), same mergeableState.
+			// Production semantics: no persist, no sequence bump.
+			await updateSnapshot(dir, 'sess_mp::o/r::1', {
+				lastCheckedAt: 1_700_000_000_000,
+				mergeableState: 'clean',
+			});
+			const seqAfterRepeat = JSON.parse(
+				fs.readFileSync(checkpointPath(dir), 'utf-8'),
+			).sequence as number;
+			expect(seqAfterRepeat).toBe(seqAfterFirst);
+		} finally {
+			restore();
+		}
+	});
+
+	test('each distinct field-value change bumps the sequence exactly once', async () => {
+		await subscribe(dir, {
+			sessionID: 'sess_mp',
+			prNumber: 1,
+			repoFullName: 'o/r',
+			prUrl: 'https://github.com/o/r/pull/1',
+		});
+		const restore = freezeClock({ fixedNow: 1_700_000_000_000 });
+		try {
+			const seqBefore = JSON.parse(
+				fs.readFileSync(checkpointPath(dir), 'utf-8'),
+			).sequence as number;
+			// Distinct errorCount values (i + 1 — the corrected child script)
+			// stay changes even with the frozen clock, because errorCount
+			// differs on every call.
+			for (let i = 0; i < 5; i++) {
+				await updateSnapshot(dir, 'sess_mp::o/r::1', {
+					lastCheckedAt: 1_700_000_000_000,
+					errorCount: i + 1,
+				});
+			}
+			const seqAfter = JSON.parse(fs.readFileSync(checkpointPath(dir), 'utf-8'))
+				.sequence as number;
+			expect(seqAfter).toBe(seqBefore + 5);
+		} finally {
+			restore();
+		}
+	});
+
+	test('concurrent calls each writing distinct values persist all of them', async () => {
+		await subscribe(dir, {
+			sessionID: 'sess_mp',
+			prNumber: 1,
+			repoFullName: 'o/r',
+			prUrl: 'https://github.com/o/r/pull/1',
+		});
+		const seqBefore = JSON.parse(fs.readFileSync(checkpointPath(dir), 'utf-8'))
+			.sequence as number;
+		// Same-process concurrency: all calls interleave on the store lock,
+		// every one writes a distinct mergeableState, so all must persist.
+		const CONCURRENT = 10;
+		await Promise.all(
+			Array.from({ length: CONCURRENT }, (_, i) =>
+				updateSnapshot(dir, 'sess_mp::o/r::1', {
+					lastCheckedAt: Date.now(),
+					mergeableState: `concurrent-${i}`,
+				}),
+			),
+		);
+		const seqAfter = JSON.parse(fs.readFileSync(checkpointPath(dir), 'utf-8'))
+			.sequence as number;
+		expect(seqAfter).toBe(seqBefore + CONCURRENT);
+		const active = await listActive(dir);
+		expect(active).toHaveLength(1);
+		expect(active[0].mergeableState).toMatch(/^concurrent-\d+$/);
+	});
 });

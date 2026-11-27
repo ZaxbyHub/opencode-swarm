@@ -10,6 +10,7 @@ import { z } from 'zod';
 import { loadPluginConfig } from '../config/loader';
 import type { RuntimePlan, TaskStatus } from '../config/plan-schema';
 import { stripKnownSwarmPrefix } from '../config/schema';
+import { promoteContextMapTaskReleaseLocked } from '../context-map/post-agent-update.js';
 import { getProfileLookupForIdentity } from '../db/qa-gate-profile.js';
 import {
 	isLegacyTaskGateRequirementsChain,
@@ -49,11 +50,12 @@ import {
 	ensureAgentSession,
 	getAgentSession,
 	getModifiedFilesForTask,
-	getStageBRouteEvidence,
+	getSettledStageBRouteEvidence,
 	getTaskState,
 	hasBothStageBCompletions,
 	hasModifiedFilesForTask,
 	isStageBRouteRequired,
+	mergeStageBRouteEvidence,
 	recordStageBCompletion,
 	startAgentSession,
 	swarmState,
@@ -426,13 +428,13 @@ function routeGateAllowsTask(
 			return false;
 		}
 		const liveEvidence = candidateSession
-			? getStageBRouteEvidence(candidateSession, taskId)
+			? getSettledStageBRouteEvidence(candidateSession, taskId)
 			: [];
 		return enforcePersistedReviewRouteReceipt({
 			projectRoot: directory,
 			sessionId: candidateSessionID,
 			taskId,
-			receipts: liveEvidence.length > 0 ? liveEvidence : durableEvidence,
+			receipts: mergeStageBRouteEvidence(liveEvidence, durableEvidence),
 			enforcementEnabled: true,
 			legacyUnrouted: false,
 			requireEvidenceBindings: true,
@@ -1394,14 +1396,16 @@ export function recoverTaskStateFromDelegations(
 	for (const [sessionId, session] of swarmState.agentSessions) {
 		if (!(session.taskWorkflowStates instanceof Map)) continue;
 		const routeEvidence = (() => {
-			const live = getStageBRouteEvidence(session, taskId);
-			if (live.length > 0) return live;
+			const live = getSettledStageBRouteEvidence(session, taskId);
 			try {
-				return routeEvidenceFromTaskGateRequirements(
-					readTaskGateRequirementsReceiptsSync(directory!, taskId),
+				return mergeStageBRouteEvidence(
+					live,
+					routeEvidenceFromTaskGateRequirements(
+						readTaskGateRequirementsReceiptsSync(directory!, taskId),
+					),
 				);
 			} catch {
-				return [];
+				return live;
 			}
 		})();
 		const routeRequired =
@@ -2407,6 +2411,26 @@ export async function executeUpdateTaskStatus(
 				session.taskWorkflowStates.set(args.task_id, terminal.state);
 				session.stageBCompletion?.delete(args.task_id);
 				updateTaskWorkflowCache(session, args.task_id, terminal);
+			}
+		}
+
+		// r14 audit repair (P1-5): the AUTHORITATIVE task release. The child
+		// transports (background completion observer, sync Task handoff)
+		// deliberately write only the non-final 'pending' context-map summary
+		// until this point; promote it to 'approved' now. Never overwrites a
+		// terminal 'rejected' entry; best-effort — it must never block the
+		// status update. Gated on the context_map config like both writers.
+		if (args.status === 'completed') {
+			try {
+				const config = loadPluginConfig(directory);
+				if (config.context_map?.enabled === true) {
+					// r16 (P2): the coordinated promotion — the whole
+					// load→promote→save cycle runs under the cross-process
+					// context-map lock so a concurrent writer cannot lose it.
+					await promoteContextMapTaskReleaseLocked(directory, args.task_id);
+				}
+			} catch {
+				// observation only — the release itself already succeeded
 			}
 		}
 

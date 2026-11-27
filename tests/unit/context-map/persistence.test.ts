@@ -384,16 +384,23 @@ describe('_internals DI seam', () => {
 		expect(result).toBeNull();
 	});
 
-	test('mock writeFileSync override is used by saveContextMap', () => {
-		// Also mock renameSync to avoid real filesystem operations
-		_internals.renameSync = mock(() => {}) as typeof _internals.renameSync;
+	test('mock atomicWriteSwarmFileSync override is used by saveContextMap', () => {
+		// r16: saveContextMap persists through the canonical atomic writer
+		// (unique registered temp + fsync + rename), seamed via _internals.
 		let writtenContent = '';
-		_internals.writeFileSync = mock((path: string, content: string) => {
-			writtenContent = content;
-		}) as typeof _internals.writeFileSync;
+		const origAtomic = _internals.atomicWriteSwarmFileSync;
+		_internals.atomicWriteSwarmFileSync = mock(
+			(_targetPath: string, content: string) => {
+				writtenContent = content;
+			},
+		) as unknown as typeof _internals.atomicWriteSwarmFileSync;
 
-		const map = createEmptyContextMap();
-		saveContextMap(map, tempDir);
+		try {
+			const map = createEmptyContextMap();
+			saveContextMap(map, tempDir);
+		} finally {
+			_internals.atomicWriteSwarmFileSync = origAtomic;
+		}
 
 		expect(writtenContent).toContain('schema_version');
 	});

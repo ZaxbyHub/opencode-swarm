@@ -81,6 +81,24 @@ async function setupProject(plan: Plan): Promise<string> {
 async function approveViaPlanCriticHook(dir: string): Promise<void> {
 	ensureAgentSession('session-baseline-drift', 'architect');
 	const hook = createDelegationGateHook(makeConfig(), dir);
+	// The plan-critic approval recorder (r14 audit repair P1-6.3) refuses an
+	// APPROVED verdict with no pre-execution dispatch baseline, so the fixture
+	// must drive the real two-phase dispatch: toolBefore captures the baseline,
+	// then toolAfter records the verdict.
+	await hook.toolBefore(
+		{
+			tool: 'Task',
+			sessionID: 'session-baseline-drift',
+			callID: 'critic-baseline-drift',
+		},
+		{
+			args: {
+				subagent_type: 'critic',
+				prompt:
+					'MODE: CRITIC-GATE\nEvaluate this plan for soundness before implementation.',
+			},
+		},
+	);
 	await hook.toolAfter(
 		{
 			tool: 'Task',

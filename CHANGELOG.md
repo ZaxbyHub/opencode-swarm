@@ -1,5 +1,30 @@
 # Changelog
 
+## [7.205.11](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.205.10...v7.205.11) (2026-11-26)
+
+
+### Bug Fixes
+
+* **ci:** give the promote-visibility integration fixtures the audited override ([be18f2a](https://github.com/ZaxbyHub/opencode-swarm/commit/be18f2ae98a06905269e5b5c205b3f6c105b7834))
+* **ci:** widen the record-race overflow margin so it holds on Linux ([f79e0e4](https://github.com/ZaxbyHub/opencode-swarm/commit/f79e0e4c64e7d42fc2139109ba11e274ef1061fe))
+* **security:** residue quarantine containment, hive promotion provenance, and external-skill approval identity ([#3836](https://github.com/ZaxbyHub/opencode-swarm/issues/3836)/[#3820](https://github.com/ZaxbyHub/opencode-swarm/issues/3820)/[#3822](https://github.com/ZaxbyHub/opencode-swarm/issues/3822)) ([af077a4](https://github.com/ZaxbyHub/opencode-swarm/commit/af077a4501df0c2b341d29f5f701c5a267294dd5))
+* **security:** resolve [#3942](https://github.com/ZaxbyHub/opencode-swarm/issues/3942) review feedback (verifier scope, CR digest bypass, revoke, sweep, docs) ([c814e53](https://github.com/ZaxbyHub/opencode-swarm/commit/c814e53d6cb1fa5734d6b915856a1a84d8399c6e))
+
+## [7.205.10](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.205.9...v7.205.10) (2026-11-26)
+
+
+### Bug Fixes
+
+* **observability:** repoint store_lock_stale_broken citation to :691 ([e7c10f0](https://github.com/ZaxbyHub/opencode-swarm/commit/e7c10f006cfac1452d96b3af0b01e50b2f646303))
+* **observability:** repoint store_lock_stale_broken producer citation to :688 ([#3934](https://github.com/ZaxbyHub/opencode-swarm/issues/3934)) ([4134926](https://github.com/ZaxbyHub/opencode-swarm/commit/4134926ac8b10c3aa2b43973a3b62f72c3936e82))
+* **parallel:** guard statSync in ownerless ageMs fallback; add regression tests ([#3934](https://github.com/ZaxbyHub/opencode-swarm/issues/3934)) ([c1e8342](https://github.com/ZaxbyHub/opencode-swarm/commit/c1e8342f9da035f9d354fddbda4460c1bc1045aa))
+* **parallel:** recover ownerless plan locks past TTL on acquire path ([#3934](https://github.com/ZaxbyHub/opencode-swarm/issues/3934)) ([427da81](https://github.com/ZaxbyHub/opencode-swarm/commit/427da81bea0746b80a353f92b14774ca4b58e402))
+* **parallel:** recover ownerless plan locks past TTL on acquire path ([#3934](https://github.com/ZaxbyHub/opencode-swarm/issues/3934)) ([97928ce](https://github.com/ZaxbyHub/opencode-swarm/commit/97928cecb5a0ad9a4d39688d1a130caa1edbd638))
+* **ratchet:** repoint target-constant-tmp producer citation for file-locks temp ([#3934](https://github.com/ZaxbyHub/opencode-swarm/issues/3934)) ([da1341c](https://github.com/ZaxbyHub/opencode-swarm/commit/da1341c9faa8d23ce60d6bff840b02bf3d615fd2))
+* **registry:** repoint file-locks citations after comment reflow ([#3934](https://github.com/ZaxbyHub/opencode-swarm/issues/3934)) ([07163da](https://github.com/ZaxbyHub/opencode-swarm/commit/07163da36c624125b78e418cc9bce1bd5557afd7))
+* **registry:** repoint file-locks citations after line shifts ([#3934](https://github.com/ZaxbyHub/opencode-swarm/issues/3934)) ([5491b65](https://github.com/ZaxbyHub/opencode-swarm/commit/5491b654eb71897238ba726895b67a2b056279a9))
+* **security:** remove useless catch in replay-identity (biome noUselessCatch) ([f3bb2eb](https://github.com/ZaxbyHub/opencode-swarm/commit/f3bb2eb7fb47ab88d7abecb4d227f9bb9553f225))
+
 ## [7.205.9](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.205.8...v7.205.9) (2026-11-25)
 
 

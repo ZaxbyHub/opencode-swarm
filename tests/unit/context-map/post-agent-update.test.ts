@@ -22,6 +22,7 @@ import type {
 	FileContextEntry,
 	TaskContextSummary,
 } from '../../../src/types/context-map';
+import { setLoadContextMap } from '../../helpers/context-map-post-agent-mocks';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -54,14 +55,6 @@ const originalInternals = { ..._internals };
 // ---------------------------------------------------------------------------
 // Mock assignment helpers — assign mock implementations to _internals
 // ---------------------------------------------------------------------------
-
-function setLoadContextMap(
-	fn: (directory: string) => ContextMap | null,
-): ReturnType<typeof mock> {
-	const mockFn = mock(fn);
-	_internals.loadContextMap = mockFn as typeof _internals.loadContextMap;
-	return mockFn;
-}
 
 function setSaveContextMap(): {
 	mockFn: ReturnType<typeof mock>;

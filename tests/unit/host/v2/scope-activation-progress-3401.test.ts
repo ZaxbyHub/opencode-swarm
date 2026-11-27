@@ -8,6 +8,7 @@ import {
 	resolveSessionChatAgent,
 } from '../../../../src/models/task-model-routing';
 import {
+	deliveredParts,
 	flatToolCalledEvents,
 	inputStarted,
 	progress,
@@ -61,16 +62,28 @@ describe('#3401 — v2 subagent progress synthesizes the v1 scope-activation par
 		expect(isTaskToolId(qualifying[0]!.tool)).toBe(true);
 	});
 
-	test('flat tool-event passthrough is preserved (called maps without a part)', async () => {
+	test('a tracked non-subagent tool.called delivers its tool-state part, not a flat passthrough (PR 3922)', async () => {
 		const parent = 'ses_p3401b';
 		const { received, drained } = await pumpEnvelopes([
-			inputStarted(parent, 'call_d3401b', 'subagent'),
+			inputStarted(parent, 'call_d3401b', 'execute'),
 			toolCalled(parent, 'call_d3401b'),
 		]);
 		expect(drained).toBe(true);
-		const called = flatToolCalledEvents(received);
-		expect(called.length).toBe(1);
-		expect(called[0]!.properties.part).toBeUndefined();
+		expect(flatToolCalledEvents(received).length).toBe(0);
+		expect(deliveredParts(received).length).toBe(1);
+		expect((deliveredParts(received)[0] as { tool?: unknown }).tool).toBe(
+			'execute',
+		);
+	});
+
+	test('a subagent tool.called is not a flat passthrough (the progress path owns it, PR 3922)', async () => {
+		const parent = 'ses_p3401e';
+		const { received, drained } = await pumpEnvelopes([
+			inputStarted(parent, 'call_d3401e', 'subagent'),
+			toolCalled(parent, 'call_d3401e'),
+		]);
+		expect(drained).toBe(true);
+		expect(flatToolCalledEvents(received).length).toBe(0);
 	});
 
 	test('the SDK properties dialect is tracked and synthesized identically', async () => {

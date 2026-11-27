@@ -32,6 +32,11 @@ import {
 } from '../../scope/scope-binding';
 import { createScopeLeaseRenewalTracker } from '../../scope/scope-lease-renewal';
 import {
+	SPEC_SCAN_ENTRY_BUDGET,
+	withSpecScanBudget,
+} from '../../sdd/effective-spec';
+import { inspectSpecDriftRecoveryWalSync } from '../../services/spec-drift-recovery';
+import {
 	advanceTaskState,
 	ensureAgentSession,
 	getActiveWindow,
@@ -46,7 +51,10 @@ import { telemetry } from '../../telemetry.js';
 import { log, warn } from '../../utils';
 import { pushAdvisory } from '../../utils/advisory-queue';
 import * as logger from '../../utils/logger';
-import { computeSpecDiff } from '../../utils/spec-hash';
+import {
+	computeSpecDiff,
+	detectUnmarkedSpecDriftSync,
+} from '../../utils/spec-hash';
 import { isStrictTaskId } from '../../validation/task-id.js';
 import { listCoderSettlementWalStates } from '../../workflow/coder-settlement.js';
 import { resolveAgentConflict } from '../conflict-resolution';
@@ -393,8 +401,30 @@ export function enforceSpecDriftGate(
 ): void {
 	if (!directory) return;
 	if (!SPEC_DRIFT_BLOCKED_TOOLS.has(toolName)) return;
+	// SolCritic F-020 (gate-owned budget): every directory enumeration on the
+	// gate path — the marker/WAL-arm diff, the markerless pair detect, and the
+	// markerless block-drift diff — shares ONE SPEC_SCAN_ENTRY_BUDGET budget.
+	// computeSpecDiff routes through readEffectiveSpecSync (an enumerating
+	// reader), so without this wrap its diff would launch an unbudgeted scan
+	// after the detect consumed its own budget. An exhausted budget omits the
+	// diff (a block may omit an unavailable diff) but never admits: detect
+	// converts exhaustion into a typed retryable block, and the diff's own
+	// exhaustion is swallowed by its per-arm try/catch below.
+	withSpecScanBudget(SPEC_SCAN_ENTRY_BUDGET, () => {
+		enforceSpecDriftGateBudgeted(directory, toolName);
+	});
+}
+
+function enforceSpecDriftGateBudgeted(
+	directory: string,
+	toolName: string,
+): void {
 	const stalePath = path.join(directory, '.swarm', 'spec-staleness.json');
-	if (fsSync.existsSync(stalePath)) {
+	const markerExists = fsSync.existsSync(stalePath);
+	const recoveryState = inspectSpecDriftRecoveryWalSync(directory);
+	const recoveryBlocked =
+		recoveryState === 'PREPARED' || recoveryState === 'corrupt';
+	if (markerExists || recoveryBlocked) {
 		let diffInfo: { diff: string; changedSections: string[] } | null = null;
 		try {
 			diffInfo = computeSpecDiff(directory);
@@ -402,9 +432,20 @@ export function enforceSpecDriftGate(
 			// Non-fatal: diff computation failure falls back to bare block message
 		}
 
+		const blockReason = markerExists
+			? '.swarm/spec-staleness.json exists'
+			: recoveryState === 'corrupt'
+				? '.swarm/spec-drift-recovery.json is corrupt or unreadable'
+				: 'a PREPARED spec-drift recovery transaction is incomplete';
+		const repairGuidance =
+			recoveryState === 'corrupt'
+				? 'Repair: an operator must restore a valid recovery WAL from backup or explicitly remove the corrupt .swarm/spec-drift-recovery.json through an authorized recovery path, then retry. Neither canonical spec_write nor /swarm acknowledge-spec-drift can clear a corrupt WAL.'
+				: recoveryState === 'PREPARED'
+					? 'Repair: persist the accepted spec through the canonical spec_write tool (dispatch the spec_writer agent with the accepted content) so recovery can complete the valid PREPARED transaction; then retry. /swarm acknowledge-spec-drift alone does not clear a WAL-only block.'
+					: 'Repair: persist the accepted spec through the canonical spec_write tool (dispatch the spec_writer agent with the accepted content) — its drift recovery clears the marker; then retry. The user may instead run /swarm clarify to enter spec repair mode (clarify alone does not clear drift) or /swarm acknowledge-spec-drift to dismiss marker-backed drift.';
 		let message =
-			`SPEC_DRIFT_BLOCK: tool "${toolName}" is blocked because .swarm/spec-staleness.json exists. ` +
-			'Run /swarm clarify to enter spec repair mode. Clarify alone does not clear drift: rewrite the spec so recovery can reconcile it, or run /swarm acknowledge-spec-drift to dismiss, then retry.';
+			`SPEC_DRIFT_BLOCK: tool "${toolName}" is blocked because ${blockReason}. ` +
+			repairGuidance;
 
 		if (diffInfo) {
 			const sectionSummary =
@@ -422,6 +463,42 @@ export function enforceSpecDriftGate(
 		}
 
 		throw new Error(message);
+	}
+
+	// PR 3920 closeout (SolCritic): the marker is not the only drift signal. While
+	// a spec_write holds the lock (publish/rollback window), loadPlan suppresses
+	// the marker, so an absent marker alone must not admit mutations. The pair is
+	// checked directly, with loadPlan's semantics. This runs even when a COMMITTED
+	// recovery WAL exists: only a marker or a PREPARED/corrupt WAL has precedence.
+	const unmarked = detectUnmarkedSpecDriftSync(directory);
+	if (unmarked.outcome === 'block-drift') {
+		let diffInfo: { diff: string; changedSections: string[] } | null = null;
+		try {
+			diffInfo = computeSpecDiff(directory);
+		} catch {
+			// Non-fatal: diff computation failure falls back to the bare message.
+		}
+		let message =
+			`SPEC_DRIFT_BLOCK: tool "${toolName}" is blocked because ${unmarked.reason}. ` +
+			'Repair: persist the accepted spec through the canonical spec_write tool (dispatch the spec_writer agent with the accepted content) — its drift recovery rebinds the plan hash; then retry. This block was detected without a staleness marker (a spec write is likely in flight); /swarm acknowledge-spec-drift does not apply to markerless drift.';
+		if (diffInfo) {
+			const sectionSummary =
+				diffInfo.changedSections.length > 0
+					? `\nChanged sections: ${diffInfo.changedSections.map((s) => `## ${s}`).join(', ')}`
+					: '';
+			message +=
+				'\n\n--- spec diff (recorded vs current) ---' +
+				sectionSummary +
+				'\n[Begin spec diff]\n' +
+				diffInfo.diff +
+				'\n[End spec diff]';
+		}
+		throw new Error(message);
+	}
+	if (unmarked.outcome === 'block-retry') {
+		throw new Error(
+			`SPEC_DRIFT_BLOCK: tool "${toolName}" is blocked because ${unmarked.reason}. This is not confirmed drift; retry the tool, and if it persists recover .swarm/plan.json (a valid plan restores admission).`,
+		);
 	}
 }
 

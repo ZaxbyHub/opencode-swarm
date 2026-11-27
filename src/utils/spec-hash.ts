@@ -1,8 +1,14 @@
 import { createHash } from 'node:crypto';
 import * as fsSync from 'node:fs';
 import { join } from 'node:path';
-import type { Plan } from '../config/plan-schema';
-import { readEffectiveSpecSync } from '../sdd/effective-spec';
+import { type Plan, PlanSchema } from '../config/plan-schema';
+import {
+	readEffectiveSpecSync,
+	SPEC_SCAN_ENTRY_BUDGET,
+	SpecScanBudgetExceededError,
+	sddProjectionSourcePresentSync,
+	withSpecScanBudget,
+} from '../sdd/effective-spec';
 
 /**
  * Computes SHA-256 hex hash of `.swarm/spec.md` content in the given directory.
@@ -127,9 +133,187 @@ export function isObligationPreserving(directory: string): boolean {
 		}
 
 		return true;
-	} catch {
+	} catch (error) {
+		// A shared-budget overrun must surface as a retryable block upstream —
+		// folding it into `false` would misclassify exhaustion as drift
+		// (SolCritic F-020).
+		if (error instanceof SpecScanBudgetExceededError) throw error;
 		return false;
 	}
+}
+
+/** Sync effective-spec hash for the markerless gate check. Null when the spec is absent. */
+function effectiveSpecHashSync(directory: string): string | null {
+	const spec = _internals.readEffectiveSpecSync(directory);
+	if (!spec) return null;
+	return createHash('sha256').update(spec.content, 'utf-8').digest('hex');
+}
+
+/** Byte cap for the gate's plan.json read; plan files are far smaller than this. */
+const MAX_PLAN_JSON_BYTES = 4 * 1024 * 1024;
+
+export type UnmarkedSpecDrift =
+	| { outcome: 'allow' }
+	| {
+			outcome: 'block-drift';
+			reason: string;
+			currentHash: string | null;
+			deletion: boolean;
+	  }
+	| { outcome: 'block-retry'; reason: string };
+
+/**
+ * PR 3920 closeout (SolCritic contract): the marker is not the only drift signal.
+ * When the marker is absent, the mutation gate independently compares plan.json's
+ * stored specHash against the current effective-spec hash, with the SAME semantics
+ * as loadPlan's marker decision: strict bounded plan.json decode + PlanSchema
+ * validation, pre-feature hashless exemption, deletion semantics, and the
+ * obligation-preserving exemption. Bootstrap (no plan.json) is allowed. An
+ * unreadable or invalid projection is block-retry (fail closed, not persistent
+ * drift). This closes the spec_write publish/rollback window without any
+ * unlocked marker write: the writer's window briefly blocks mutations, and the
+ * reconcile's rebind (or rollback) releases them.
+ */
+export function detectUnmarkedSpecDriftSync(
+	directory: string,
+): UnmarkedSpecDrift {
+	let raw: string;
+	try {
+		const planPath = join(directory, '.swarm', 'plan.json');
+		const stat = fsSync.statSync(planPath);
+		if (!stat.isFile() || stat.size > MAX_PLAN_JSON_BYTES) {
+			return {
+				outcome: 'block-retry',
+				reason: '.swarm/plan.json is unreadable or over the 4 MiB gate bound',
+			};
+		}
+		raw = new TextDecoder('utf-8', { fatal: true }).decode(
+			fsSync.readFileSync(planPath),
+		);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
+			// Bootstrap / no plan: nothing to compare, and loadPlan writes no marker.
+			return { outcome: 'allow' };
+		}
+		return {
+			outcome: 'block-retry',
+			reason: `.swarm/plan.json could not be read: ${error instanceof Error ? error.message : String(error)}`,
+		};
+	}
+	let parsed: Plan;
+	try {
+		const json: unknown = JSON.parse(raw);
+		const validated = PlanSchema.safeParse(json);
+		if (!validated.success) {
+			return {
+				outcome: 'block-retry',
+				reason: '.swarm/plan.json failed schema validation; recover or retry',
+			};
+		}
+		parsed = validated.data;
+	} catch {
+		return {
+			outcome: 'block-retry',
+			reason: '.swarm/plan.json is not valid JSON; recover or retry',
+		};
+	}
+	// Pre-feature plan: no specHash means the pair is exempt (same as loadPlan).
+	// The hashless fast path runs BEFORE any budgeted scan (SolCritic F-020).
+	if (!parsed.specHash) return { outcome: 'allow' };
+	// SolCritic F-020 (gate-owned budget): ONE budget of SPEC_SCAN_ENTRY_BUDGET
+	// directory-entry visits shared across EVERY scan on the markerless path —
+	// the projection read (openspec current-specs walk, changes listing, each
+	// change's nested specs scan, Spec-Kit detection) and the presence
+	// fallback. Entries are charged at every dirent read BEFORE filtering;
+	// exhaustion aborts as a typed retryable block — never a partial hash, a
+	// deletion, or an admission. When the guardrail wraps the whole gate, this
+	// nested call SHARES that outer budget (withSpecScanBudget never mints a
+	// second budget inside an active one), so the post-block diff draws from
+	// the same entry allowance too.
+	try {
+		return withSpecScanBudget(SPEC_SCAN_ENTRY_BUDGET, () =>
+			detectUnmarkedSpecDriftBudgeted(directory, parsed),
+		);
+	} catch (error) {
+		if (error instanceof SpecScanBudgetExceededError) {
+			return {
+				outcome: 'block-retry',
+				reason: 'the openspec projection source could not be scanned; retry',
+			};
+		}
+		throw error;
+	}
+}
+
+/**
+ * Budgeted tail of {@link detectUnmarkedSpecDriftSync}: the effective-spec
+ * hash read, the drift/deletion classification, and the presence fallback.
+ * Runs ONLY inside {@link withSpecScanBudget}; a
+ * {@link SpecScanBudgetExceededError} escaping this function is converted by
+ * the caller into a typed retryable block (SolCritic F-020).
+ */
+function detectUnmarkedSpecDriftBudgeted(
+	directory: string,
+	parsed: Plan,
+): UnmarkedSpecDrift {
+	let currentHash: string | null;
+	try {
+		currentHash = effectiveSpecHashSync(directory);
+	} catch (error) {
+		if (error instanceof SpecScanBudgetExceededError) throw error;
+		return {
+			outcome: 'block-retry',
+			reason: 'the effective spec could not be read; retry',
+		};
+	}
+	if (currentHash === parsed.specHash) return { outcome: 'allow' };
+	// A null effective spec is deletion only when the canonical spec.md is absent
+	// too. The reader also returns null on permission errors and oversize input
+	// (effective-spec.ts), which are unreadability, not deletion: those are
+	// retryable, not persistent drift (SolCritic F-010).
+	let deletion = false;
+	if (currentHash === null) {
+		if (fsSync.existsSync(join(directory, '.swarm', 'spec.md'))) {
+			// The native file exists but the reader returned null: permission error or
+			// oversize. Unreadability, not deletion (SolCritic F-010).
+			return {
+				outcome: 'block-retry',
+				reason:
+					'the effective spec could not be read (unreadable or oversize); retry or recover .swarm/spec.md',
+			};
+		}
+		// No native file. A bound projection source (env or sdd config) whose
+		// projection FAILED also returns null — that is a projection error, not a
+		// deletion (SolCritic F-011). Only an unbound, genuinely absent spec is
+		// deletion.
+		const sourcePresent = sddProjectionSourcePresentSync(directory);
+		if (sourcePresent === 'unknown') {
+			return {
+				outcome: 'block-retry',
+				reason: 'the openspec projection source could not be scanned; retry',
+			};
+		}
+		if (sourcePresent) {
+			return {
+				outcome: 'block-retry',
+				reason:
+					'the bound spec projection could not be produced; retry or repair the projection source',
+			};
+		}
+		deletion = true;
+	}
+	// Obligation-preserving edits keep the allowlist exemption (same as loadPlan).
+	if (deletion || !_internals.isObligationPreserving(directory)) {
+		return {
+			outcome: 'block-drift',
+			reason: deletion
+				? 'effective spec has been deleted since the plan was saved'
+				: 'effective spec has been modified since the plan was saved (no staleness marker present)',
+			currentHash,
+			deletion,
+		};
+	}
+	return { outcome: 'allow' };
 }
 
 /**
@@ -142,12 +326,14 @@ export const _internals: {
 	isObligationPreserving: typeof isObligationPreserving;
 	isSpecStale: typeof isSpecStale;
 	readEffectiveSpecSync: typeof readEffectiveSpecSync;
+	detectUnmarkedSpecDriftSync: typeof detectUnmarkedSpecDriftSync;
 } = {
 	computeSpecDiff,
 	computeSpecHash,
 	isObligationPreserving,
 	isSpecStale,
 	readEffectiveSpecSync,
+	detectUnmarkedSpecDriftSync,
 } as const;
 
 /**
