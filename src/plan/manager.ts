@@ -91,7 +91,13 @@ import {
 import { epicMergeFailureSkipsCheckpoint } from '../epic/merge-epoch.js';
 import { appendCoreEventSync } from '../events/core-events.js';
 import { readSwarmFileAsync } from '../hooks/utils';
-import { tryAcquireLock } from '../parallel/file-locks.js';
+import {
+	acquireOwnerLockOnce,
+	getOwnerLockPath,
+	isLocked,
+	LOCK_TIMEOUT_MS,
+	tryAcquireLock,
+} from '../parallel/file-locks.js';
 import { recordTaskAttempt } from '../services/run-memory.js';
 import { emit } from '../telemetry.js';
 import type { SpecStaleDetectedEvent } from '../types/events';
@@ -182,6 +188,8 @@ export function resetStartupLedgerCheck(): void {
  */
 export const _internals: {
 	loadPlan: typeof loadPlan;
+	/** Spec hash of plan.json as read under the spec.md owner lock (marker decision). */
+	readPlanSpecHashUnderLock: (directory: string) => Promise<string | undefined>;
 	loadPlanJsonOnly: typeof loadPlanJsonOnly;
 	readPlanJsonUtf8: typeof readPlanJsonUtf8;
 	readPlanFileUtf8: typeof readPlanFileUtf8;
@@ -210,6 +218,7 @@ export const _internals: {
 	) => Promise<AutoCheckpointOutcome>;
 } = {
 	loadPlan,
+	readPlanSpecHashUnderLock,
 	loadPlanJsonOnly,
 	readPlanJsonUtf8,
 	readPlanFileUtf8,
@@ -723,6 +732,103 @@ export async function regeneratePlanMarkdown(
  * 3. .swarm/plan.md exists only -> migrate from plan.md, save both files, return Plan
  * 4. Neither exists -> return null
  */
+/**
+ * Spec hash of plan.json as read under the spec.md owner lock. undefined means no
+ * readable specHash, so the caller keeps the snapshot pair. Exposed through
+ * _internals so tests can model a writer that completed inside the window.
+ */
+async function readPlanSpecHashUnderLock(
+	directory: string,
+): Promise<string | undefined> {
+	try {
+		const raw = await fsPromises.readFile(
+			path.join(directory, '.swarm', 'plan.json'),
+			'utf-8',
+		);
+		const parsed = JSON.parse(raw) as { specHash?: unknown };
+		return typeof parsed.specHash === 'string' ? parsed.specHash : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * PR 3920 closeout (F-001 follow-up): the markerless staleness check in loadPlan
+ * ran unlocked, so a spec_write inside its publish or rollback window could leave
+ * a stranded drift marker that blocks save_plan until acknowledged. The decision
+ * is taken under the spec.md owner lock:
+ * - a lock younger than LOCK_TIMEOUT_MS is in flight. That covers a live holder
+ *   and an owner that has created the file but not yet published its payload.
+ *   The writer reconciles or restores prior bytes, so no marker is written from
+ *   its window;
+ * - an older lock is not in flight, so suppression is bounded by the lock TTL and
+ *   a leaked lock cannot hide drift indefinitely;
+ * - otherwise the lock is acquired and the staleness pair is re-read under it.
+ */
+async function decideSpecMarker<P extends { specHash?: string | null }>(
+	directory: string,
+	plan: P,
+): Promise<
+	| { decision: 'skip' }
+	| {
+			decision: 'write';
+			plan: P;
+			stale: Awaited<ReturnType<typeof isSpecStale>>;
+			release: () => void;
+	  }
+> {
+	const lockPath = getOwnerLockPath(directory, 'spec.md');
+	const inFlight = async (): Promise<boolean> => {
+		if (isLocked(directory, 'spec.md') === null) return false;
+		try {
+			const stat = await fsPromises.stat(lockPath);
+			return Date.now() - stat.mtimeMs < LOCK_TIMEOUT_MS;
+		} catch {
+			return false;
+		}
+	};
+	if (await inFlight()) return { decision: 'skip' };
+	await fsPromises.mkdir(path.dirname(lockPath), { recursive: true });
+	// A contender can release between a failed acquire and the in-flight probe, so
+	// retry while it is gone. The read path never sweeps or mutates other locks.
+	let attempt = acquireOwnerLockOnce(lockPath, 'loadPlan', 'spec-marker');
+	for (let retry = 0; !attempt.acquired && retry < 3; retry += 1) {
+		if (await inFlight()) return { decision: 'skip' };
+		attempt = acquireOwnerLockOnce(lockPath, 'loadPlan', 'spec-marker');
+	}
+	// Still unacquirable: skip, never write unlocked. Drift during this window is
+	// caught by the gate's markerless pair check (detectUnmarkedSpecDriftSync in
+	// spec-hash.ts, enforced by enforceSpecDriftGate), which blocks protected
+	// mutations until the writer's rebind or rollback lands. Only a lock owner
+	// publishes a marker (SolCritic contract, PR 3920 F-005/F-007).
+	if (!attempt.acquired) return { decision: 'skip' };
+	try {
+		const lockedSpecHash =
+			await _internals.readPlanSpecHashUnderLock(directory);
+		const lockedPlan =
+			lockedSpecHash === undefined
+				? plan
+				: ({ ...plan, specHash: lockedSpecHash } as unknown as P);
+		const stale = await isSpecStale(
+			directory,
+			lockedPlan as unknown as Parameters<typeof isSpecStale>[1],
+		);
+		if (!stale.stale) {
+			attempt.release();
+			return { decision: 'skip' };
+		}
+		return {
+			decision: 'write',
+			plan: lockedPlan,
+			stale,
+			release: attempt.release,
+		};
+	} catch (error) {
+		attempt.release();
+		throw error;
+	}
+}
+
 export async function loadPlan(
 	directory: string,
 	cache?: Map<string, Promise<string | null>>,
@@ -957,7 +1063,10 @@ export async function loadPlan(
 
 							// Allowlist check: skip marker for obligation-preserving edits
 							const preserving = await isObligationPreserving(directory);
-							if (!preserving) {
+							const markerDecision = preserving
+								? null
+								: await decideSpecMarker(directory, validated);
+							if (markerDecision?.decision === 'write') {
 								// Write spec-staleness.json (includes precomputed diff so
 								// system-enhancer can render the advisory without importing
 								// spec-hash at module-load time — avoids repro-704 T1 regression).
@@ -993,9 +1102,10 @@ export async function loadPlan(
 												type: 'spec_stale_detected',
 												timestamp: new Date().toISOString(),
 												phase: validated.current_phase ?? 1,
-												specHash_plan: validated.specHash,
-												specHash_current: staleResult.currentHash ?? null,
-												reason: staleResult.reason,
+												specHash_plan: markerDecision.plan.specHash as string,
+												specHash_current:
+													markerDecision.stale.currentHash ?? null,
+												reason: markerDecision.stale.reason,
 												planTitle: validated.title,
 												diff: diffInfo?.diff ?? null,
 												changedSections: diffInfo?.changedSections ?? [],
@@ -1008,7 +1118,9 @@ export async function loadPlan(
 									);
 									// #1619 F1 — see the rationale above the enclosing try.
 									invalidateCachedArtifact(specStalenessPath);
+									markerDecision.release();
 								} catch (error) {
+									markerDecision.release();
 									if (error instanceof PlanRecoverySupersededError) throw error;
 									// Non-fatal: spec-staleness.json write failure does not block plan loading
 								}
@@ -1020,9 +1132,9 @@ export async function loadPlan(
 										type: 'spec_stale_detected',
 										timestamp: new Date().toISOString(),
 										phase: validated.current_phase ?? 1,
-										specHash_plan: validated.specHash,
-										specHash_current: staleResult.currentHash ?? null,
-										reason: staleResult.reason ?? 'unknown',
+										specHash_plan: markerDecision.plan.specHash as string,
+										specHash_current: markerDecision.stale.currentHash ?? null,
+										reason: markerDecision.stale.reason ?? 'unknown',
 										planTitle: validated.title,
 									};
 									options?.preCommitCheck?.();

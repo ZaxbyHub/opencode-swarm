@@ -260,9 +260,11 @@ function lessonRevision(lesson: string): string {
  * when present, cohort resolution reuses the session's cached cohort id (see
  * the `_internals.resolveCohortId` default).
  *
- * @note The 'hive-fast-track' tag is privileged — it bypasses the 3-phase
- *   confirmation requirement inside the eligibility_route gate. It should only
- *   be set by authorized tooling (inferTags() never produces it automatically).
+ * @note Eligibility route 2 is privileged fast-track authorization. Since
+ *   #3820 (H3) it is armed ONLY by the dedicated `hive_fast_track_authorized`
+ *   field, which `promoteToHive`'s synthetic stand-in sets — the caller-writable
+ *   `hive-fast-track` tag no longer satisfies the route (the store still strips
+ *   it from caller tags as defense in depth).
  */
 export async function checkHivePromotions(
 	swarmEntries: SwarmKnowledgeEntry[],
@@ -1131,6 +1133,16 @@ export async function promoteToHive(
 	// Default to schema defaults when the command did not load one.
 	const policyConfig = config ?? _internals.loadDefaultKnowledgeConfig();
 
+	// #3820 H2: load authoritative terminal-application evidence OUTSIDE the
+	// hive transaction (same seam the automatic path uses). The direct-text
+	// path has no prior swarm entry id, so its synthetic stand-in ('manual-direct')
+	// has no evidence bucket — with the gate active by default, ordinary
+	// direct-text promotion requires the audited override (ASK-1).
+	const evidenceMap = await _internals.loadPromotionEvidence(
+		directory,
+		sourceCohort.cohortId,
+	);
+
 	const result = await _internals.transactHiveStore<string>(async (ctx) => {
 		// Dedup against the locked entries.
 		if (
@@ -1164,19 +1176,26 @@ export async function promoteToHive(
 		}
 
 		// Evaluate the one policy. The direct-text path has no swarm entry, so
-		// we synthesize a minimal stand-in. Per #1847 §4, a human explicitly
-		// authoring a hive lesson IS the authorization for the eligibility_route
-		// (route 2 fast-track) — this is recorded as actor:'manual' (NOT
-		// 'manual-override'). The active_status + confidence_floor +
-		// application-evidence gates still apply honestly. --force is required
-		// only when THOSE gates fail, recording actor:'manual-override' + the
-		// failed gates. (F-006: the fast-track tag here is the explicit manual
-		// authorization, not a silent self-satisfaction — it is documented and
-		// the actor field distinguishes authorized-manual from forced-override.)
+		// we synthesize a minimal stand-in. (#3820 H3) Route 2 is armed via the
+		// DEDICATED `hive_fast_track_authorized` field — the ONLY writer of that
+		// field is this authorized manual stand-in path; the caller-writable
+		// `tags` array can no longer satisfy route 2.
 		//
-		// #1821 A3: the fast-track tag authorizes the eligibility_route gate ONLY.
-		// It does NOT bypass `actionability_floor` — the stand-in carries exactly
-		// the predicate/scope fields the caller supplied, so a bare
+		// (#3820 H2 / ASK-1 ruling) With the application-evidence gate active by
+		// default, the `validated_terminal_applications` gate FAILS here — the
+		// stand-in has no prior swarm entry id, so there is no application
+		// evidence to load. Ordinary direct-text promotion therefore REQUIRES
+		// the audited override (`force` + non-empty `reason`), which promotes
+		// with actor:'manual-override' and records the failed gates. Without
+		// force the promotion is refused with the policy diagnostics naming the
+		// override. The documented operator opt-out
+		// (`promotion_min_terminal_applications: 0`) keeps an evidence-free
+		// direct-text promotion possible at actor:'manual' for explicit legacy
+		// configs.
+		//
+		// #1821 A3: the fast-track authorization arms the eligibility_route gate
+		// ONLY. It does NOT bypass `actionability_floor` — the stand-in carries
+		// exactly the predicate/scope fields the caller supplied, so a bare
 		// `/swarm promote "<prose>"` is blocked like any other non-actionable
 		// candidate.
 		const swarmStandIn: SwarmKnowledgeEntry = {
@@ -1184,7 +1203,8 @@ export async function promoteToHive(
 			tier: 'swarm',
 			lesson: trimmedLesson,
 			category: (category as KnowledgeCategory) || 'process',
-			tags: ['hive-fast-track'], // route 2: explicit manual authorization
+			tags: [],
+			hive_fast_track_authorized: true, // route 2: authorized manual stand-in (#3820 H3)
 			scope: 'global',
 			confidence: 1.0,
 			status: 'promoted',
@@ -1203,7 +1223,7 @@ export async function promoteToHive(
 		const decision = evaluatePromotionPolicy({
 			entry: swarmStandIn,
 			config: policyConfig,
-			evidence: [],
+			evidence: evidenceMap[swarmStandIn.id] ?? [],
 		});
 
 		const force = options?.force === true;
@@ -1322,6 +1342,15 @@ export async function promoteFromSwarm(
 	// thresholds as automatic promotion (AC9). Default to schema defaults.
 	const policyConfig = config ?? _internals.loadDefaultKnowledgeConfig();
 
+	// #3820 H2: load authoritative terminal-application evidence OUTSIDE the
+	// hive transaction (same seam the automatic path uses). The swarm lesson's
+	// own id is the evidence key, so a from-swarm promotion consults the same
+	// independent-application receipts the automatic path would.
+	const evidenceMap = await _internals.loadPromotionEvidence(
+		directory,
+		sourceCohort.cohortId,
+	);
+
 	const result = await _internals.transactHiveStore<string>(async (ctx) => {
 		if (
 			findNearDuplicate(
@@ -1353,11 +1382,13 @@ export async function promoteFromSwarm(
 		}
 
 		// One policy evaluator (M1: same gates as auto promotion). An exact id
-		// alone is NEVER authorization to bypass policy.
+		// alone is NEVER authorization to bypass policy. (#3820 H2) Real
+		// terminal-application evidence is loaded above and keyed on the swarm
+		// entry id — no hardcoded empty array.
 		const decision = evaluatePromotionPolicy({
 			entry: swarmEntry,
 			config: policyConfig,
-			evidence: [],
+			evidence: evidenceMap[swarmEntry.id] ?? [],
 		});
 
 		const force = options?.force === true;

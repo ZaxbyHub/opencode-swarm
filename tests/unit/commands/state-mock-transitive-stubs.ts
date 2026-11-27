@@ -68,6 +68,12 @@ export const STATE_MOCK_TRANSITIVE_STUBS = {
 	recordStageBRouteEvidence: () => undefined,
 	reserveStageBRouteEvidence: () => null,
 	getStageBRouteEvidence: () => [],
+	// PR 3919 reclaim work: three new route-evidence projections; the
+	// same missing-binding failure class as #2491 while state.js is
+	// mocked.
+	getSettledStageBRouteEvidence: () => [],
+	mergeStageBRouteEvidence: () => [],
+	stageBRouteEvidenceForSettlement: () => [],
 	clearStageBRouteEvidence: () => undefined,
 	markStageBRouteRequired: () => undefined,
 	isStageBRouteRequired: () => false,

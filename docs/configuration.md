@@ -2075,6 +2075,7 @@ auto-activate skills.
 | `knowledge.realtime_learning_nudge.repeat_after_tool_calls` | number | `25` | Minimum additional tool calls before the same session can be nudged again. |
 | `knowledge.receipt_close_grace_days` | integer | `7` | Retains resolved V2 receipt membership for this many days after durable phase closure before archival/compaction eligibility. Accepts `0`-`3650`; live or unresolved membership is never age-evicted. |
 | `knowledge.promotion_require_actionable` | boolean | `true` | Enforces the actionability floor on **every** hive-promotion path — automatic promotion, `/swarm promote <text>`, and `/swarm promote --from-swarm <id>`. A lesson is promotable only if it carries at least one predicate (`required_actions`, `forbidden_actions`, `verification_checks`) **and** at least one scope (`applies_to_tools`, `applies_to_agents`). See [the promote command](./commands.md#swarm-promote---category-cat---from-swarm-id-actionability-flags-text) for the flags that supply them. |
+| `knowledge.promotion_min_terminal_applications` | number | `1` | Minimum independent validated terminal-application receipts required for promotion (issue #3820). Default 1 activates the application-evidence gate on every hive-promotion route; set `0` to opt out of this gate (which weakens provenance enforcement). Legacy records receive no synthetic credit. |
 
 ### Instruction cache key and invalidation inputs (issue #2672)
 
@@ -2450,8 +2451,8 @@ When `curation_enabled: true`, the architect agent gains access to 7 tools:
 **"Promote fails with 'content hash mismatch'"**
 → The candidate was modified after discovery (TOCTOU detection). Re-discover the candidate to get a fresh evaluation.
 
-**"Revoke fails with 'cannot extract skill slug from history'"**
-→ The candidate's promotion history may be corrupted or missing. The revoke tool needs the slug from the original promotion record to locate the SKILL.md file. If the history was tampered with, delete the candidate and manually remove the SKILL.md file.
+**"Revoke cannot determine the legacy skill slug"**
+→ Inspect the candidate's promotion history and generated-skill path; structured records use their recorded target. Do not delete a mismatched artifact without reviewing it.
 
 ## Turbo Configuration
 

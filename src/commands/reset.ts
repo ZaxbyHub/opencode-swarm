@@ -72,12 +72,13 @@ export async function handleResetCommand(
 		'plan.md',
 		'plan.json',
 		'context.md',
-		// Single-session spec-drift state. spec-staleness.json is an existence-only
-		// gate (enforceSpecDriftGate) that hard-blocks the core write tools
+		// Single-session spec-drift state. The marker and PREPARED WAL both
+		// hard-block the core write tools (enforceSpecDriftGate)
 		// (save_plan, update_task_status, phase_complete, lean_turbo_run_phase,
 		// lean_turbo_acquire_locks) — a survivor mis-routes or blocks the next session.
 		'spec.md',
 		'spec-staleness.json',
+		'spec-drift-recovery.json',
 		'spec-snapshot.md',
 		'SWARM_PLAN.md',
 		'SWARM_PLAN.json',

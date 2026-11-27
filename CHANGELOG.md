@@ -1,5 +1,15 @@
 # Changelog
 
+## [7.205.11](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.205.10...v7.205.11) (2026-11-26)
+
+
+### Bug Fixes
+
+* **ci:** give the promote-visibility integration fixtures the audited override ([be18f2a](https://github.com/ZaxbyHub/opencode-swarm/commit/be18f2ae98a06905269e5b5c205b3f6c105b7834))
+* **ci:** widen the record-race overflow margin so it holds on Linux ([f79e0e4](https://github.com/ZaxbyHub/opencode-swarm/commit/f79e0e4c64e7d42fc2139109ba11e274ef1061fe))
+* **security:** residue quarantine containment, hive promotion provenance, and external-skill approval identity ([#3836](https://github.com/ZaxbyHub/opencode-swarm/issues/3836)/[#3820](https://github.com/ZaxbyHub/opencode-swarm/issues/3820)/[#3822](https://github.com/ZaxbyHub/opencode-swarm/issues/3822)) ([af077a4](https://github.com/ZaxbyHub/opencode-swarm/commit/af077a4501df0c2b341d29f5f701c5a267294dd5))
+* **security:** resolve [#3942](https://github.com/ZaxbyHub/opencode-swarm/issues/3942) review feedback (verifier scope, CR digest bypass, revoke, sweep, docs) ([c814e53](https://github.com/ZaxbyHub/opencode-swarm/commit/c814e53d6cb1fa5734d6b915856a1a84d8399c6e))
+
 ## [7.205.10](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.205.9...v7.205.10) (2026-11-26)
 
 
