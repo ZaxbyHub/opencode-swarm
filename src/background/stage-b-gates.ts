@@ -29,6 +29,7 @@ import {
 	readReviewRouteReceiptSync,
 } from '../review/routing-enforcement.js';
 import { isStageBRouteCompleteAtSettlement } from '../review/stage-b-route-settlement.js';
+import { isPathIdentityWithin } from '../scope/path-identity.js';
 import { canonicalWorkspaceIdentity } from '../scope/scope-binding.js';
 import {
 	type AgentSessionState,
@@ -57,6 +58,7 @@ import {
 	updateTaskWorkflowCache,
 } from '../state.js';
 import * as logger from '../utils/logger.js';
+import { normalizeAttributionPath } from './attribution-path.js';
 import type {
 	BackgroundDelegationRecord,
 	BackgroundDelegationResult,
@@ -113,29 +115,6 @@ function structuredStageBVerdict(
 	return 'fail';
 }
 
-function normalizeAttributionPath(file: string): string | null {
-	const normalized = file
-		.trim()
-		.replaceAll('\\', '/')
-		.replace(/^\.\/+/, '');
-	const hasControlCharacter = [...normalized].some((character) => {
-		const code = character.charCodeAt(0);
-		return code <= 31 || code === 127;
-	});
-	if (
-		!normalized ||
-		normalized.startsWith('/') ||
-		/^[A-Za-z]:\//.test(normalized) ||
-		normalized === '..' ||
-		normalized.startsWith('../') ||
-		normalized.split('/').includes('..') ||
-		hasControlCharacter
-	) {
-		return null;
-	}
-	return normalized;
-}
-
 function normalizedPathSet(
 	files: readonly string[] | null,
 ): Set<string> | null {
@@ -151,6 +130,123 @@ function normalizedPathSet(
 
 function pathSetsEqual(left: Set<string>, right: Set<string>): boolean {
 	return left.size === right.size && [...left].every((file) => right.has(file));
+}
+
+/**
+ * Scope-membership test for a file against a declared scope set.
+ *
+ * A declared entry may be a DIRECTORY (e.g. `declare_scope` called with
+ * `files: ["context"]`): the coder write-scope guard treats such a scope as
+ * covering everything beneath it, so a coder scoped to a directory can
+ * legitimately edit `context/<file>`. The attribution filters here must not
+ * be stricter than the write gate — with exact-path matching only, every
+ * file a directory-scoped background coder changed fell out of
+ * `attributedFiles`, the completion settled as `dispatch_no_mutation`
+ * despite real mutations, and the task wedged at Stage A forever (the
+ * observed task-1.13 background settlement wedge). Directory-prefix
+ * matching cannot false-positive: a declared FILE entry has no children, so
+ * `file.startsWith(entry + '/')` is false for every other path.
+ *
+ * Both sides are keyed through {@link scopeMatchKey} so win32 case-folds
+ * exactly like the write gate this mirrors (`isPathWithinDeclaredScope` →
+ * `normalizePathIdentity` lowercases on win32 while declare-scope.ts retains
+ * the relative input spelling): a declared `Context` must still cover the
+ * Git-reported `context/a.md`, or the write is permitted but unattributed
+ * and the task wedges at `dispatch_no_mutation` (PR 3918 review F-003).
+ * Case-sensitive platforms keep exact matching so two files differing only
+ * by case remain distinct.
+ */
+function scopeSetContainsFile(scope: Set<string>, file: string): boolean {
+	for (const entry of scope) {
+		if (isPathIdentityWithin(file, entry)) return true;
+	}
+	return false;
+}
+
+/** Nullable twin of {@link scopeSetContainsFile}: a missing scope contains nothing. */
+function scopeSetMaybeContainsFile(
+	scope: Set<string> | null | undefined,
+	file: string,
+): boolean {
+	return scope ? scopeSetContainsFile(scope, file) : false;
+}
+
+/**
+ * Fingerprint equality with the filename reconciled through the win32
+ * case-fold key (PR 3918 review F-003): the routed (guardrail-observed) and
+ * the Git-reported spelling of one file may differ in case on Windows, so
+ * both file fields are keyed through {@link scopeMatchKey} before the exact
+ * field-for-field equality. POSIX keys are identity — unchanged there.
+ */
+function fingerprintsEqualWithCanonicalFile(
+	routed: ReviewerScopeFileFingerprint,
+	observed: ReviewerScopeFileFingerprint,
+): boolean {
+	return reviewerScopeFileFingerprintsEqual(
+		{ ...routed, file: scopeMatchKey(routed.file) },
+		{ ...observed, file: scopeMatchKey(observed.file) },
+	);
+}
+
+/**
+ * Canonical-keyed routed-file membership for distinct-owner validation: the
+ * owner's routed (guardrail-observed) spelling may differ in case from the
+ * Git-reported spelling on Windows (PR 3918 review F-003 round 2), so
+ * membership is keyed through {@link scopeMatchKey}. Two routed spellings
+ * folding onto one key are ambiguous provenance and fail closed; POSIX keys
+ * are identity, so exact matching (and case-distinct files) are preserved
+ * there. Routed entries are concrete files and are never matched as
+ * directory containers.
+ */
+function routedSetUnambiguouslyContainsFile(
+	routed: Set<string> | null,
+	file: string,
+): boolean {
+	if (!routed) return false;
+	const key = scopeMatchKey(file);
+	let matches = 0;
+	for (const entry of routed) {
+		if (scopeMatchKey(entry) !== key) continue;
+		matches += 1;
+		if (matches > 1) return false;
+	}
+	return matches === 1;
+}
+
+/**
+ * File-identity leg of distinct-owner validation, shared by the live and
+ * historical paths (PR 3918 review F-003 round 2): declared membership
+ * (directory-aware), routed membership, and the routed fingerprint are all
+ * reconciled to the Git-observed spelling through the same win32 case-fold
+ * key used by the receipts handoff. Routed spellings or fingerprint entries
+ * that fold two identities onto one key are ambiguous provenance and fail
+ * closed. POSIX keys are identity, so behavior there is exactly the previous
+ * exact-match semantics.
+ */
+function ownerExplainsObservedFile(input: {
+	file: string;
+	fingerprint: ReviewerScopeFileFingerprint;
+	declaredFiles: readonly string[] | null;
+	modifiedFiles: readonly string[] | null;
+	modifiedFileFingerprints: readonly ReviewerScopeFileFingerprint[] | null;
+}): boolean {
+	const declared = normalizedPathSet(input.declaredFiles);
+	const routed = normalizedPathSet(input.modifiedFiles);
+	if (
+		!scopeSetMaybeContainsFile(declared, input.file) ||
+		!routedSetUnambiguouslyContainsFile(routed, input.file)
+	) {
+		return false;
+	}
+	const key = scopeMatchKey(input.file);
+	const fingerprints = (input.modifiedFileFingerprints ?? []).filter(
+		(entry) =>
+			scopeMatchKey(normalizeAttributionPath(entry.file) ?? '') === key,
+	);
+	return (
+		fingerprints.length === 1 &&
+		fingerprintsEqualWithCanonicalFile(fingerprints[0], input.fingerprint)
+	);
 }
 
 function hasDistinctBackgroundOwner(input: {
@@ -180,21 +276,19 @@ function hasDistinctBackgroundOwner(input: {
 		) {
 			return false;
 		}
-		const declared = normalizedPathSet(generation.declaredFiles);
-		const routed = normalizedPathSet(generation.modifiedFiles);
-		const fingerprints = generation.modifiedFileFingerprints.filter(
-			(entry) => normalizeAttributionPath(entry.file) === input.file,
-		);
 		const ownerCompletedAt = generation.readyAt ?? input.candidateCompletedAt;
 		return (
 			Number.isFinite(generation.createdAt) &&
 			Number.isFinite(ownerCompletedAt) &&
 			generation.createdAt <= input.candidateCompletedAt &&
 			input.candidateCreatedAt <= ownerCompletedAt &&
-			declared?.has(input.file) === true &&
-			routed?.has(input.file) === true &&
-			fingerprints.length === 1 &&
-			reviewerScopeFileFingerprintsEqual(fingerprints[0], input.fingerprint)
+			ownerExplainsObservedFile({
+				file: input.file,
+				fingerprint: input.fingerprint,
+				declaredFiles: generation.declaredFiles,
+				modifiedFiles: generation.modifiedFiles,
+				modifiedFileFingerprints: generation.modifiedFileFingerprints,
+			})
 		);
 	});
 	const historicalOwners = getReviewerScopeOwnershipHistory({
@@ -206,11 +300,6 @@ function hasDistinctBackgroundOwner(input: {
 		) {
 			return false;
 		}
-		const declared = normalizedPathSet(owner.declaredFiles);
-		const routed = normalizedPathSet(owner.modifiedFiles);
-		const fingerprints = owner.modifiedFileFingerprints.filter(
-			(entry) => normalizeAttributionPath(entry.file) === input.file,
-		);
 		return (
 			owner.parentSessionID === input.parentSessionID &&
 			owner.background === true &&
@@ -218,10 +307,13 @@ function hasDistinctBackgroundOwner(input: {
 			Number.isFinite(owner.readyAt) &&
 			owner.createdAt <= input.candidateCompletedAt &&
 			input.candidateCreatedAt <= owner.readyAt &&
-			declared?.has(input.file) === true &&
-			routed?.has(input.file) === true &&
-			fingerprints.length === 1 &&
-			reviewerScopeFileFingerprintsEqual(fingerprints[0], input.fingerprint)
+			ownerExplainsObservedFile({
+				file: input.file,
+				fingerprint: input.fingerprint,
+				declaredFiles: owner.declaredFiles,
+				modifiedFiles: owner.modifiedFiles,
+				modifiedFileFingerprints: owner.modifiedFileFingerprints,
+			})
 		);
 	});
 	return liveOwners.length + historicalOwners.length === 1;
@@ -256,6 +348,7 @@ export function validateStageBWorkspace(
 		scope: record.workspace?.scope ?? null,
 		prHeadSha: record.workspace?.prHeadSha ?? null,
 		resolveCurrentPrHeadSha: record.workspace?.prHeadSha !== null,
+		captureChangedFileHashes: true,
 	});
 	const check = compareStageBWorkspace(record, actualWorkspace, directory);
 	return { ...check, ok: !check.stale };
@@ -303,12 +396,28 @@ function scopeDirtySlice(
 ): Set<string> {
 	const slice = new Set<string>();
 	for (const file of files) {
-		const normalized = normalizeAttributionPath(file);
-		if (normalized !== null && scopeFiles.has(scopeMatchKey(normalized))) {
-			slice.add(normalized);
-		}
+		if (scopeSetContainsFile(scopeFiles, file)) slice.add(file);
 	}
 	return slice;
+}
+
+function canonicalDirtyHashMap(
+	hashes: Record<string, string> | null | undefined,
+): Map<string, string> | null {
+	if (!hashes) return null;
+	const canonical = new Map<string, string>();
+	for (const [file, hash] of Object.entries(hashes)) {
+		if (
+			file.length === 0 ||
+			(hash !== 'missing' && !/^[a-f0-9]{64}$/.test(hash))
+		) {
+			return null;
+		}
+		const key = scopeMatchKey(file);
+		if (canonical.has(key)) return null;
+		canonical.set(key, hash);
+	}
+	return canonical;
 }
 
 export function compareStageBWorkspace(
@@ -340,15 +449,20 @@ export function compareStageBWorkspace(
 	const currentHead = actualWorkspace.gitHead;
 	const expectedChanged = expectedWorkspace.changedFiles;
 	const currentChanged = actualWorkspace.changedFiles;
+	if (scopeFiles === null) {
+		return compareWorkspaceSnapshots(expectedWorkspace, actualWorkspace);
+	}
 	if (
-		scopeFiles === null ||
 		expectedHead == null ||
 		currentHead == null ||
 		expectedChanged == null ||
 		currentChanged == null ||
 		directory === undefined
 	) {
-		return compareWorkspaceSnapshots(expectedWorkspace, actualWorkspace);
+		return {
+			stale: true,
+			reason: 'scoped workspace freshness evidence unavailable',
+		};
 	}
 	// Project-root and PR-head identity still bind the whole workspace; only
 	// the tree-state legs narrow. Nulling the two tree fields reuses the
@@ -365,7 +479,7 @@ export function compareStageBWorkspace(
 		return compareWorkspaceSnapshots(expectedWorkspace, actualWorkspace);
 	}
 	const committedInScope = committed.filter((file) =>
-		scopeFiles.has(scopeMatchKey(normalizeAttributionPath(file) ?? '')),
+		scopeSetContainsFile(scopeFiles, file),
 	);
 	if (committedInScope.length > 0) {
 		const shown = committedInScope.slice(0, 5).join(', ');
@@ -387,6 +501,42 @@ export function compareStageBWorkspace(
 			stale: true,
 			reason: `in-scope dirty set changed: +[${dirtied.join(', ')}] -[${cleaned.join(', ')}]`,
 		};
+	}
+	// Path sets cannot detect another edit to a file that was already dirty.
+	// Stage B captures bounded per-file content identities for the declared
+	// scope; compare only those identities so unrelated dirt stays isolated.
+	// Legacy records without the optional map fail closed when scoped dirt
+	// exists rather than claiming freshness they cannot prove.
+	if (dispatchDirty.size > 0 || currentDirty.size > 0) {
+		const expectedHashes = canonicalDirtyHashMap(
+			expectedWorkspace.changedFileHashes,
+		);
+		const currentHashes = canonicalDirtyHashMap(
+			actualWorkspace.changedFileHashes,
+		);
+		if (!expectedHashes || !currentHashes) {
+			return {
+				stale: true,
+				reason: 'in-scope dirty content identities unavailable',
+			};
+		}
+		for (const file of new Set([...dispatchDirty, ...currentDirty])) {
+			const key = scopeMatchKey(file);
+			const expectedHash = expectedHashes.get(key);
+			const currentHash = currentHashes.get(key);
+			if (expectedHash === undefined || currentHash === undefined) {
+				return {
+					stale: true,
+					reason: `in-scope dirty content identity unavailable: ${file}`,
+				};
+			}
+			if (expectedHash !== currentHash) {
+				return {
+					stale: true,
+					reason: `in-scope dirty content changed: ${file}`,
+				};
+			}
+		}
 	}
 	return { stale: false };
 }
@@ -440,7 +590,7 @@ export async function ingestBackgroundStageBCompletion(args: {
 				// declared scope so concurrent background coders don't cross-attribute.
 				if (observedSet && declaredSet) {
 					attributedFiles = [...observedSet].filter((file) =>
-						declaredSet.has(file),
+						scopeSetContainsFile(declaredSet, file),
 					);
 				}
 			}
@@ -454,7 +604,7 @@ export async function ingestBackgroundStageBCompletion(args: {
 					};
 				}
 				attributedFiles = [...observedSet].filter((file) =>
-					declaredSet.has(file),
+					scopeSetContainsFile(declaredSet, file),
 				);
 				const generation = getReviewerScopeGenerationForCoderCall({
 					parentSessionID: args.record.parentSessionId,
@@ -521,11 +671,49 @@ export async function ingestBackgroundStageBCompletion(args: {
 				}
 				const changedWithinDeclaredScope = new Set(
 					[...observedSet].filter(
-						(file) => declaredSet.has(file) && generationScope?.has(file),
+						(file) =>
+							scopeSetContainsFile(declaredSet, file) &&
+							scopeSetMaybeContainsFile(generationScope, file),
 					),
 				);
+				// Reconcile guardrail-routed spellings with Git-reported
+				// spellings through the same win32 case-fold key used for
+				// scope membership (PR 3918 review F-003): on a
+				// case-insensitive checkout the coder may route
+				// `Context/entry-a.md` while git reports the tracked file as
+				// `context/entry-a.md`. Distinct spellings folding to one key
+				// on either side are ambiguous identities and fail closed in
+				// the guard below; POSIX keys are identity, so exact matching
+				// and case-distinct files are preserved there.
+				const observedFileByKey = new Map<string, string>();
+				let observedIdentitiesUnambiguous = true;
+				for (const file of observedSet) {
+					const key = scopeMatchKey(file);
+					if (observedFileByKey.has(key)) {
+						observedIdentitiesUnambiguous = false;
+					} else {
+						observedFileByKey.set(key, file);
+					}
+				}
+				const routedFileByKey = new Map<string, string>();
+				let routedIdentitiesUnambiguous = true;
+				for (const file of routedFiles ?? []) {
+					const key = scopeMatchKey(file);
+					if (routedFileByKey.has(key)) {
+						routedIdentitiesUnambiguous = false;
+					} else {
+						routedFileByKey.set(key, file);
+					}
+				}
+				const routedIdentitiesReconciled =
+					observedIdentitiesUnambiguous &&
+					routedIdentitiesUnambiguous &&
+					routedFileByKey.size === changedWithinDeclaredScope.size &&
+					[...changedWithinDeclaredScope].every((file) =>
+						routedFileByKey.has(scopeMatchKey(file)),
+					);
 				const observedOutsideCurrentScope = [...observedSet].filter(
-					(file) => !generationScope?.has(file),
+					(file) => !scopeSetMaybeContainsFile(generationScope, file),
 				);
 				if (
 					(generation?.status !== 'collecting' &&
@@ -536,12 +724,13 @@ export async function ingestBackgroundStageBCompletion(args: {
 					!routedFingerprints ||
 					routedFiles.size === 0 ||
 					!pathSetsEqual(declaredSet, generationScope) ||
-					!pathSetsEqual(routedFiles, changedWithinDeclaredScope) ||
+					!routedIdentitiesReconciled ||
 					reviewerScopeGenerationHasDeclaredOverlap({
 						parentSessionID: args.record.parentSessionId,
 						taskId,
 						coderCallID: args.record.callID,
 						declaredFiles: generation.declaredFiles,
+						workspaceIdentity: generation.workspaceIdentity,
 					}) ||
 					observedOutsideCurrentScope.some(
 						(file) =>
@@ -556,17 +745,23 @@ export async function ingestBackgroundStageBCompletion(args: {
 							}),
 					) ||
 					[...routedFiles].some((file) => {
+						const key = scopeMatchKey(file);
+						const observedFile = observedFileByKey.get(key);
 						const fingerprints = routedFingerprints.filter(
-							(entry) => normalizeAttributionPath(entry.file) === file,
+							(entry) =>
+								scopeMatchKey(normalizeAttributionPath(entry.file) ?? '') ===
+								key,
 						);
-						const observedFingerprint = observedFingerprints.get(file);
+						const observedFingerprint = observedFile
+							? observedFingerprints.get(observedFile)
+							: undefined;
 						return (
-							!observedSet.has(file) ||
-							!declaredSet.has(file) ||
-							!generationScope.has(file) ||
+							observedFile === undefined ||
+							!scopeSetContainsFile(declaredSet, file) ||
+							!scopeSetContainsFile(generationScope, file) ||
 							fingerprints.length !== 1 ||
 							!observedFingerprint ||
-							!reviewerScopeFileFingerprintsEqual(
+							!fingerprintsEqualWithCanonicalFile(
 								fingerprints[0],
 								observedFingerprint,
 							)
@@ -580,20 +775,33 @@ export async function ingestBackgroundStageBCompletion(args: {
 							'background coder scope handoff could not be reconstructed exactly',
 					};
 				}
-				attributedFiles = [...routedFiles];
+				// Credit the Git-reported (canonical) spelling — the identity
+				// git and the durable evidence agree on. The routed spelling is
+				// only the coder's authored path and may differ in case on
+				// Windows; the guard above proved a 1:1 key correspondence, so
+				// exactly one canonical file is credited per routed entry.
+				attributedFiles = [...routedFiles].map(
+					(file) => observedFileByKey.get(scopeMatchKey(file)) ?? file,
+				);
 				// Repair path (issue #2100): ingestion re-captured every routed
 				// file's exact bytes against the generation's bound root — write
 				// them back so the completeness gate at ready-publication sees a
 				// fully populated fingerprint set even when a write-time capture
-				// transiently failed.
+				// transiently failed. The fingerprint is rekeyed to the routed
+				// spelling so the generation's modifiedFiles and fingerprint
+				// files stay in one identity family for markReady's exact
+				// completeness check.
 				for (const file of routedFiles) {
-					const fingerprint = observedFingerprints.get(file);
+					const observedFile = observedFileByKey.get(scopeMatchKey(file));
+					const fingerprint = observedFile
+						? observedFingerprints.get(observedFile)
+						: undefined;
 					if (fingerprint) {
 						recordReviewerScopeGenerationFileFingerprint({
 							parentSessionID: args.record.parentSessionId,
 							taskId,
 							coderCallID: args.record.callID,
-							fingerprint,
+							fingerprint: { ...fingerprint, file },
 						});
 					}
 				}

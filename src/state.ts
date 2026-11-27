@@ -2256,26 +2256,84 @@ export function discardReviewerScopeGenerationClaim(input: {
 }
 
 /**
+ * Repo-relative spelling for declared-scope overlap comparison: forward
+ * slashes, no leading `./`, surrounding whitespace trimmed. Local twin of the
+ * stage-b-gates attribution normalizer (`normalizeAttributionPath`) —
+ * importing it here would create a state.ts <-> stage-b-gates.ts cycle.
+ */
+function normalizeDeclaredOverlapEntry(file: string): string {
+	return file
+		.trim()
+		.replaceAll('\\', '/')
+		.replace(/^\.\/+/, '');
+}
+
+/**
+ * Case-fold declared-scope keys on Windows only, mirroring the coder write
+ * gate (`scope/path-identity` `normalizePathIdentity`) and the stage-b
+ * scope-membership key: git `core.ignorecase` can report declared and routed
+ * paths with different casing, so overlap must not be case-blind there.
+ * Case-sensitive platforms keep exact matching.
+ */
+const DECLARED_OVERLAP_CASE_FOLD = process.platform === 'win32';
+
+function declaredOverlapKey(entry: string): string {
+	return DECLARED_OVERLAP_CASE_FOLD ? entry.toLowerCase() : entry;
+}
+
+/**
+ * Segment-aware collision between two normalized declared-scope keys: equal
+ * paths, or one entry is a directory container of the other. Exact-equality
+ * matching alone treated `context` and `context/a.ts` as disjoint, so two
+ * concurrently collecting coder generations sharing one checkout could each
+ * receive mutation credit for `context/a.ts` even with identical
+ * fingerprints (PR 3918 review F-002).
+ */
+function declaredOverlapKeysCollide(aKey: string, bKey: string): boolean {
+	if (aKey === bKey) return true;
+	if (aKey.length === 0 || bKey.length === 0) return false;
+	return bKey.startsWith(`${aKey}/`) || aKey.startsWith(`${bKey}/`);
+}
+
+/**
  * Detect a concurrently collecting coder generation whose declaration overlaps
  * this exact coder call. Shared declared paths cannot be attributed safely from
  * one workspace snapshot, even when child write routing observed both calls.
+ * Overlap is segment-aware: a directory declaration collides with every
+ * descendant file declaration (and vice versa), not just with an identical
+ * string — the receipts handoff filters route directory descendants through
+ * this predicate, so exact matching would let ambiguous concurrent writes be
+ * credited to more than one task.
  */
 export function reviewerScopeGenerationHasDeclaredOverlap(input: {
 	parentSessionID: string;
 	taskId: string;
 	coderCallID: string;
 	declaredFiles: string[];
+	workspaceIdentity?: string;
 }): boolean {
 	const session = swarmState.agentSessions.get(input.parentSessionID);
 	if (!session) return false;
 	const { generations } = ensureReviewerScopeGenerationState(session);
-	const declared = new Set(input.declaredFiles);
+	const declaredKeys = input.declaredFiles.map((file) =>
+		declaredOverlapKey(normalizeDeclaredOverlapEntry(file)),
+	);
 	return [...generations.values()].some(
 		(entry) =>
 			entry.status === 'collecting' &&
+			(!input.workspaceIdentity ||
+				!entry.workspaceIdentity ||
+				entry.workspaceIdentity === input.workspaceIdentity) &&
 			(entry.taskId !== input.taskId ||
 				entry.coderCallID !== input.coderCallID) &&
-			entry.declaredFiles.some((file) => declared.has(file)),
+			entry.declaredFiles.some((file) =>
+				declaredKeys.some((candidate) =>
+					declaredOverlapKeysCollide(
+						candidate,
+						declaredOverlapKey(normalizeDeclaredOverlapEntry(file)),
+					),
+				),
+			),
 	);
 }
 
