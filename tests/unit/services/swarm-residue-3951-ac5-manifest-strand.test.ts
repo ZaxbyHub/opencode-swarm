@@ -37,6 +37,10 @@ import {
 	rollbackResidueQuarantine,
 } from '../../../src/services/swarm-residue.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
+import { withFrozenClockAsync } from '../../helpers/test-clock.js';
+
+/** Deterministic instant every clock read in this file is relative to. */
+const FIXED_NOW = 1_800_000_000_000;
 
 const REAL_RENAME = residueInternals.renameResidueEntry;
 
@@ -66,7 +70,7 @@ function seedStaleResidue(
 	fs.writeFileSync(path.join(swarmRoot, targetName), '{"probe":true}', 'utf-8');
 	const tempPath = path.join(swarmRoot, `${targetName}.${token}.tmp`);
 	fs.writeFileSync(tempPath, 'partial-write', 'utf-8');
-	const old = new Date(Date.now() - 2 * 60 * 60_000);
+	const old = new Date(FIXED_NOW - 2 * 60 * 60_000);
 	fs.utimesSync(tempPath, old, old);
 	return tempPath;
 }
@@ -94,7 +98,8 @@ function injectManifestWriteFailure(): () => void {
 }
 
 describe('quarantineSwarmResidue manifest-after-move — regression: manifest persistence failure strands moved payloads and wedges default rollback (#3951 AC5)', () => {
-	test('every moved file is back at its original path or recoverable through normal rollback', async () => {
+	test('every moved file is back at its original path or recoverable through normal rollback', () =>
+		withFrozenClockAsync(async () => {
 		const tmp = makeGitProject('ac5-strand-');
 		try {
 			const tempPath = seedStaleResidue(tmp, 'plan.json', '0'.repeat(32));
@@ -134,17 +139,24 @@ describe('quarantineSwarmResidue manifest-after-move — regression: manifest pe
 		} finally {
 			fs.rmSync(tmp, { recursive: true, force: true });
 		}
-	}, 30_000);
+		}, { fixedNow: FIXED_NOW }), 30_000);
 
 	test('the failed newest batch does not block default rollback of an older valid batch', async () => {
 		const tmp = makeGitProject('ac5-wedge-');
 		try {
+			// Two SEQUENTIAL freezes (never nested): batch ids carry an ISO
+			// timestamp prefix, so the OLDER batch is created at FIXED_NOW and
+			// the NEWER at FIXED_NOW + 60s — a single frozen instant would
+			// collapse the id ordering onto the random suffix.
 			// 1. An OLDER batch quarantined successfully (real manifest).
-			const olderTemp = seedStaleResidue(tmp, 'state.json', '1'.repeat(32));
+			let olderTemp = '';
+			let olderBatchDir = '';
+			await withFrozenClockAsync(async () => {
+			olderTemp = seedStaleResidue(tmp, 'state.json', '1'.repeat(32));
 			const first = await quarantineSwarmResidue(tmp, { trigger: 'close' });
 			expect(first.quarantined).toBe(1);
 			expect(first.batchRelDir).toBeDefined();
-			const olderBatchDir = path.join(
+			olderBatchDir = path.join(
 				tmp,
 				'.swarm',
 				first.batchRelDir as string,
@@ -153,8 +165,10 @@ describe('quarantineSwarmResidue manifest-after-move — regression: manifest pe
 				true,
 			);
 			expect(fs.existsSync(olderTemp)).toBe(false); // moved into the batch
+			}, { fixedNow: FIXED_NOW });
 
 			// 2. A NEWER batch wedged by the manifest-write failure.
+			await withFrozenClockAsync(async () => {
 			const newerTemp = seedStaleResidue(tmp, 'plan.json', '0'.repeat(32));
 			const restore = injectManifestWriteFailure();
 			let secondError: unknown;
@@ -207,6 +221,7 @@ describe('quarantineSwarmResidue manifest-after-move — regression: manifest pe
 				fs.existsSync(olderTemp),
 				`older valid batch payload not restored to ${olderTemp}`,
 			).toBe(true);
+			}, { fixedNow: FIXED_NOW + 60_000 });
 		} finally {
 			fs.rmSync(tmp, { recursive: true, force: true });
 		}

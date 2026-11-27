@@ -27,12 +27,26 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { createExternalSkillStore } from '../../../src/services/external-skill-store.js';
+import { _internals as validatorInternals } from '../../../src/services/external-skill-validator.js';
 import { external_skill_promote } from '../../../src/tools/external-skill-promote.js';
 import {
 	external_skill_revoke,
 	_internals as revokeInternals,
 } from '../../../src/tools/external-skill-revoke.js';
+import { withFrozenClockAsync } from '../../helpers/test-clock.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
+
+/** Deterministic instant every clock read in this file is relative to. */
+const FIXED_NOW = 1_800_000_000_000;
+
+/**
+ * The validator's provenance scan reads "now" through a DI seam that calls a
+ * bare no-arg Date constructor (src/services/external-skill-validator.ts:1055),
+ * which the Date-spy in test-clock.ts cannot intercept. Pin the seam to the
+ * frozen instant so seeded candidate stamps compare consistently.
+ */
+const FROZEN_ISO = new Date(FIXED_NOW).toISOString();
+const realGetTimestamp = validatorInternals.getTimestamp;
 
 function callTool(
 	tool: unknown,
@@ -81,7 +95,7 @@ async function seedApprovedCandidate(
 		source_type: 'github',
 		publisher: 'trace-3951',
 		sha256: createHash('sha256').update(body).digest('hex'),
-		fetched_at: new Date(Date.now() - 60_000).toISOString(),
+		fetched_at: new Date(FIXED_NOW - 60_000).toISOString(),
 		skill_name: 'ac6-probe',
 		skill_body: body,
 		risk_flags: [],
@@ -89,7 +103,7 @@ async function seedApprovedCandidate(
 		evaluation_history: [
 			{
 				verdict: 'passed',
-				timestamp: new Date(Date.now() - 60_000).toISOString(),
+				timestamp: new Date(FIXED_NOW - 60_000).toISOString(),
 				actor: 'system',
 				reason: 'gates',
 			},
@@ -105,105 +119,120 @@ describe('external_skill_revoke verify-to-unlink window — regression: delayed 
 	afterEach(() => {
 		// Restore the seam even if the test body threw mid-interleave.
 		revokeInternals.retireSkillFile = realRetireSkillFile;
+		validatorInternals.getTimestamp = realGetTimestamp;
 		if (tmpDir) {
 			void fs.rm(tmpDir, { recursive: true, force: true });
 		}
 	});
 
-	test('a delayed revoke resuming after a concurrent revoke + a different candidate promoted into the slug leaves the replacement file and its promotion record unchanged', async () => {
-		tmpDir = canonicalMkdtemp('ac6-revoke-window-');
-		await writeTestConfig(tmpDir);
+	test(
+		'a delayed revoke resuming after a concurrent revoke + a different candidate promoted into the slug leaves the replacement file and its promotion record unchanged',
+		() =>
+			withFrozenClockAsync(
+				async () => {
+					validatorInternals.getTimestamp = () => FROZEN_ISO;
+					tmpDir = canonicalMkdtemp('ac6-revoke-window-');
+					await writeTestConfig(tmpDir);
 
-		const slug = 'ac6-revoke-window';
-		const c1 = await seedApprovedCandidate(tmpDir, 'c1');
-		const c2 = await seedApprovedCandidate(tmpDir, 'c2');
-		const skillPath = path.join(
-			tmpDir,
-			'.opencode',
-			'skills',
-			'generated',
-			slug,
-			'SKILL.md',
-		);
-
-		const promote1 = JSON.parse(
-			await callTool(
-				external_skill_promote,
-				{ candidate_id: c1, slug, approver: 'user' },
-				tmpDir,
-			),
-		) as { success?: boolean };
-		expect(promote1.success, 'precondition: C1 promoted into the slug').toBe(
-			true,
-		);
-
-		// Inject the interleaving INSIDE the verify→unlink gap, at the
-		// retireSkillFile seam. Full argument forwarding (the fix may add an
-		// expectedDigest option to the seam signature — the wrapper stays
-		// arity-agnostic).
-		let injected = false;
-		let interleavePromoteSuccess: boolean | undefined;
-		revokeInternals.retireSkillFile = (async (
-			filePath: string,
-			...rest: unknown[]
-		) => {
-			if (!injected) {
-				injected = true;
-				// (a) the concurrent revoke's completion: slug vacated.
-				await realRetireSkillFile(filePath, ...rest);
-				// (b) a DIFFERENT approved candidate is promoted into the same
-				//     slug through the normal writeSkillFile path.
-				const p2 = JSON.parse(
-					await callTool(
-						external_skill_promote,
-						{ candidate_id: c2, slug, approver: 'user' },
+					const slug = 'ac6-revoke-window';
+					const c1 = await seedApprovedCandidate(tmpDir, 'c1');
+					const c2 = await seedApprovedCandidate(tmpDir, 'c2');
+					const skillPath = path.join(
 						tmpDir,
-					),
-				) as { success?: boolean };
-				interleavePromoteSuccess = p2.success;
-				// (c) falls through: the delayed revoke's unlink proceeds now.
-			}
-			return realRetireSkillFile(filePath, ...rest);
-		}) as typeof revokeInternals.retireSkillFile;
+						'.opencode',
+						'skills',
+						'generated',
+						slug,
+						'SKILL.md',
+					);
 
-		// The delayed revoke (A) — must COMPLETE without throwing.
-		let revokeThrew = false;
-		let rawAck = '';
-		try {
-			rawAck = await callTool(
-				external_skill_revoke,
-				{ candidate_id: c1, reason: 'ac6 delayed revoke' },
-				tmpDir,
-			);
-		} catch {
-			revokeThrew = true;
-		} finally {
-			revokeInternals.retireSkillFile = realRetireSkillFile;
-		}
-		expect(revokeThrew, 'the delayed revoke call must not throw').toBe(false);
-		expect(injected, 'precondition: the interleave fired').toBe(true);
-		expect(
-			interleavePromoteSuccess,
-			'precondition: C2 promotion into the vacated slug succeeded',
-		).toBe(true);
+					const promote1 = JSON.parse(
+						await callTool(
+							external_skill_promote,
+							{ candidate_id: c1, slug, approver: 'user' },
+							tmpDir,
+						),
+					) as { success?: boolean };
+					expect(
+						promote1.success,
+						'precondition: C1 promoted into the slug',
+					).toBe(true);
 
-		// AC6 outcome: the replacement SKILL.md still exists AND C2's promotion
-		// record still reads 'promoted' (the revoke may refuse instead, but the
-		// replacement must survive either way).
-		const replacementExists = await fs.stat(skillPath).then(
-			() => true,
-			() => false,
-		);
-		expect(
-			replacementExists,
-			`replacement SKILL.md at ${skillPath} was deleted by the delayed revoke`,
-		).toBe(true);
+					// Inject the interleaving INSIDE the verify→unlink gap, at the
+					// retireSkillFile seam. Full argument forwarding (the fix may add an
+					// expectedDigest option to the seam signature — the wrapper stays
+					// arity-agnostic).
+					let injected = false;
+					let interleavePromoteSuccess: boolean | undefined;
+					revokeInternals.retireSkillFile = (async (
+						filePath: string,
+						...rest: unknown[]
+					) => {
+						if (!injected) {
+							injected = true;
+							// (a) the concurrent revoke's completion: slug vacated.
+							await realRetireSkillFile(filePath, ...rest);
+							// (b) a DIFFERENT approved candidate is promoted into the same
+							//     slug through the normal writeSkillFile path.
+							const p2 = JSON.parse(
+								await callTool(
+									external_skill_promote,
+									{ candidate_id: c2, slug, approver: 'user' },
+									tmpDir,
+								),
+							) as { success?: boolean };
+							interleavePromoteSuccess = p2.success;
+							// (c) falls through: the delayed revoke's unlink proceeds now.
+						}
+						return realRetireSkillFile(filePath, ...rest);
+					}) as typeof revokeInternals.retireSkillFile;
 
-		const store = createExternalSkillStore(tmpDir, { max_candidates: 500 });
-		const c2After = await store.get(c2);
-		expect(
-			c2After?.evaluation_verdict,
-			'C2 promotion record must still read promoted',
-		).toBe('promoted');
-	}, 30_000);
+					// The delayed revoke (A) — must COMPLETE without throwing.
+					let revokeThrew = false;
+					let rawAck = '';
+					try {
+						rawAck = await callTool(
+							external_skill_revoke,
+							{ candidate_id: c1, reason: 'ac6 delayed revoke' },
+							tmpDir,
+						);
+					} catch {
+						revokeThrew = true;
+					} finally {
+						revokeInternals.retireSkillFile = realRetireSkillFile;
+					}
+					expect(revokeThrew, 'the delayed revoke call must not throw').toBe(
+						false,
+					);
+					expect(injected, 'precondition: the interleave fired').toBe(true);
+					expect(
+						interleavePromoteSuccess,
+						'precondition: C2 promotion into the vacated slug succeeded',
+					).toBe(true);
+
+					// AC6 outcome: the replacement SKILL.md still exists AND C2's promotion
+					// record still reads 'promoted' (the revoke may refuse instead, but the
+					// replacement must survive either way).
+					const replacementExists = await fs.stat(skillPath).then(
+						() => true,
+						() => false,
+					);
+					expect(
+						replacementExists,
+						`replacement SKILL.md at ${skillPath} was deleted by the delayed revoke`,
+					).toBe(true);
+
+					const store = createExternalSkillStore(tmpDir, {
+						max_candidates: 500,
+					});
+					const c2After = await store.get(c2);
+					expect(
+						c2After?.evaluation_verdict,
+						'C2 promotion record must still read promoted',
+					).toBe('promoted');
+				},
+				{ fixedNow: FIXED_NOW },
+			),
+		30_000,
+	);
 });

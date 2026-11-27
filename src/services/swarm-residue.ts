@@ -690,6 +690,55 @@ function parentSiblingRecoveryPath(swarmRoot: string, batchId: string): string {
 }
 
 /**
+ * Directory-content guard for the post-compensation cleanup (#3951 review
+ * round 1): destructive removal is allowed only when EVERY file under the
+ * batch dir is a known metadata artifact (manifest surfaces, the rollback
+ * attempt marker, or atomic-write temp leftovers for them). Any other file —
+ * payload that raced back in, or a foreign file — blocks the cleanup; the
+ * empty-of-payload summary alone cannot establish safety.
+ */
+function batchDirContainsOnlyMetadata(batchAbs: string): boolean {
+	const METADATA_NAMES = new Set([
+		BATCH_MANIFEST,
+		BATCH_RECOVERY_MANIFEST,
+		ROLLBACK_ATTEMPTED_MARKER,
+	]);
+	const METADATA_PREFIXES = [
+		`${BATCH_MANIFEST}.`,
+		`${BATCH_RECOVERY_MANIFEST}.`,
+	]; // atomic-write temps: <name>.<suffix>.tmp
+	let onlyMetadata = true;
+	const walk = (dir: string): void => {
+		let entries: fs.Dirent[];
+		try {
+			entries = fs.readdirSync(dir, { withFileTypes: true });
+		} catch {
+			onlyMetadata = false;
+			return;
+		}
+		for (const entry of entries) {
+			if (entry.isDirectory()) {
+				// The injected failure artifact is a DIRECTORY named
+				// manifest.json; other directories are foreign content.
+				if (entry.name === BATCH_MANIFEST) {
+					walk(path.join(dir, entry.name));
+				} else {
+					onlyMetadata = false;
+				}
+				continue;
+			}
+			const isMetadata =
+				METADATA_NAMES.has(entry.name) ||
+				METADATA_PREFIXES.some((p) => entry.name.startsWith(p)) ||
+				entry.name.endsWith('.tmp');
+			if (!isMetadata) onlyMetadata = false;
+		}
+	};
+	walk(batchAbs);
+	return onlyMetadata;
+}
+
+/**
  * #3951 AC5 — collision-safe compensation for a batch whose manifest write
  * failed after the renames. Mirrors rollbackResidueQuarantine's per-entry
  * semantics: absent original → reverse-rename; present original → sha-compare
@@ -767,15 +816,21 @@ function compensateQuarantineBatch(
 }
 
 /**
- * #3951 AC5 — publish the in-memory manifest on the recovery surfaces when
+ * #3951 AC5 — publish a recovery manifest on the fallback surfaces when
  * compensation leaves anything in the batch (uncompensated or collision-kept),
  * so normal rollback can restore/report it. Two surfaces, tried in order:
  * in-batch `manifest.recovery.json`, then the parent-sibling (the primary
  * failure mode — an unwritable/blocking name INSIDE the batch dir — cannot
  * also block the parent). Best-effort: a failure on both surfaces leaves the
  * batch dir as-is; the rethrown quarantine error names the batch and entries.
- * When NOTHING remains in the batch, remove the (now payload-free) batch dir
- * best-effort instead — never a recursive delete with payload present.
+ *
+ * Review round 1 (implementation review): the recovery manifest carries ONLY
+ * the unresolved entries — entries compensation already restored have no
+ * stored copy left, so listing them would make rollback report `missing-copy`
+ * forever and the batch could never drain. When NOTHING remains, the (now
+ * payload-free) batch dir is removed best-effort — guarded by an actual
+ * directory-content check so a FOREIGN file dropped into the batch dir is
+ * never recursively deleted (the summary alone cannot establish that).
  */
 function publishRecoveryManifest(
 	swarmRoot: string,
@@ -789,15 +844,25 @@ function publishRecoveryManifest(
 	},
 ): void {
 	const remaining = summary.uncompensated.length + summary.collisions.length;
-	const serialized = `${JSON.stringify(manifest, null, 2)}\n`;
 	if (remaining === 0) {
-		try {
-			fs.rmSync(batchAbs, { recursive: true, force: true });
-		} catch {
-			/* best-effort removal of the now payload-free batch dir */
+		if (batchDirContainsOnlyMetadata(batchAbs)) {
+			try {
+				fs.rmSync(batchAbs, { recursive: true, force: true });
+			} catch {
+				/* best-effort removal of the metadata-only batch dir */
+			}
 		}
 		return;
 	}
+	const recoveryManifest: QuarantineManifest = {
+		...manifest,
+		entries: manifest.entries.filter(
+			(entry) =>
+				summary.uncompensated.includes(entry.original_rel_path) ||
+				summary.collisions.includes(entry.original_rel_path),
+		),
+	};
+	const serialized = `${JSON.stringify(recoveryManifest, null, 2)}\n`;
 	try {
 		atomicWriteSwarmFileSync(
 			path.join(batchAbs, BATCH_RECOVERY_MANIFEST),

@@ -29,10 +29,24 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { validateSkillReference } from '../../../src/hooks/skill-propagation-gate.js';
 import { createExternalSkillStore } from '../../../src/services/external-skill-store.js';
+import { _internals as validatorInternals } from '../../../src/services/external-skill-validator.js';
 import { retireSkill } from '../../../src/services/skill-generator.js';
 import { external_skill_promote } from '../../../src/tools/external-skill-promote.js';
 import { external_skill_revoke } from '../../../src/tools/external-skill-revoke.js';
+import { withFrozenClockAsync } from '../../helpers/test-clock.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
+
+/** Deterministic instant every clock read in this file is relative to. */
+const FIXED_NOW = 1_800_000_000_000;
+
+/**
+ * The validator's provenance scan reads "now" through a DI seam that calls a
+ * bare no-arg Date constructor (src/services/external-skill-validator.ts:1055),
+ * which the Date-spy in test-clock.ts cannot intercept. Pin the seam to the
+ * frozen instant so seeded candidate stamps compare consistently.
+ */
+const FROZEN_ISO = new Date(FIXED_NOW).toISOString();
+const realGetTimestamp = validatorInternals.getTimestamp;
 
 function callTool(
 	tool: unknown,
@@ -80,7 +94,7 @@ async function seedApprovedCandidate(
 		source_type: 'github',
 		publisher: 'trace-3951',
 		sha256: createHash('sha256').update(body).digest('hex'),
-		fetched_at: new Date(Date.now() - 60_000).toISOString(),
+		fetched_at: new Date(FIXED_NOW - 60_000).toISOString(),
 		skill_name: 'ac7-probe',
 		skill_body: body,
 		risk_flags: [],
@@ -88,7 +102,7 @@ async function seedApprovedCandidate(
 		evaluation_history: [
 			{
 				verdict: 'passed',
-				timestamp: new Date(Date.now() - 60_000).toISOString(),
+				timestamp: new Date(FIXED_NOW - 60_000).toISOString(),
 				actor: 'system',
 				reason: 'gates',
 			},
@@ -101,107 +115,122 @@ describe('external_skill_promote after curator retirement — regression: stale 
 	let tmpDir: string;
 
 	afterEach(() => {
+		validatorInternals.getTimestamp = realGetTimestamp;
 		if (tmpDir) {
 			void fs.rm(tmpDir, { recursive: true, force: true });
 		}
 	});
 
-	test('after curator retirement + successful revoke, promoting a different approved candidate into the same slug yields a gate-accepted skill or an explicit pre-write refusal', async () => {
-		tmpDir = canonicalMkdtemp('ac7-repromote-');
-		await writeTestConfig(tmpDir);
+	test(
+		'after curator retirement + successful revoke, promoting a different approved candidate into the same slug yields a gate-accepted skill or an explicit pre-write refusal',
+		() =>
+			withFrozenClockAsync(
+				async () => {
+					validatorInternals.getTimestamp = () => FROZEN_ISO;
+					tmpDir = canonicalMkdtemp('ac7-repromote-');
+					await writeTestConfig(tmpDir);
 
-		const slug = 'ac7-repromote';
-		const skillDir = path.join(
-			tmpDir,
-			'.opencode',
-			'skills',
-			'generated',
-			slug,
-		);
-		const skillPath = path.join(skillDir, 'SKILL.md');
-		const markerPath = path.join(skillDir, 'retired.marker');
+					const slug = 'ac7-repromote';
+					const skillDir = path.join(
+						tmpDir,
+						'.opencode',
+						'skills',
+						'generated',
+						slug,
+					);
+					const skillPath = path.join(skillDir, 'SKILL.md');
+					const markerPath = path.join(skillDir, 'retired.marker');
 
-		const c1 = await seedApprovedCandidate(tmpDir, 'c1');
-		const c2 = await seedApprovedCandidate(tmpDir, 'c2');
+					const c1 = await seedApprovedCandidate(tmpDir, 'c1');
+					const c2 = await seedApprovedCandidate(tmpDir, 'c2');
 
-		// 1. Promote C1.
-		const promote1 = JSON.parse(
-			await callTool(
-				external_skill_promote,
-				{ candidate_id: c1, slug, approver: 'user' },
-				tmpDir,
+					// 1. Promote C1.
+					const promote1 = JSON.parse(
+						await callTool(
+							external_skill_promote,
+							{ candidate_id: c1, slug, approver: 'user' },
+							tmpDir,
+						),
+					) as { success?: boolean };
+					expect(promote1.success, 'precondition: C1 promotion succeeded').toBe(
+						true,
+					);
+
+					// 2. Curator retirement writes the marker and LEAVES SKILL.md (#1822
+					//    reversibility contract — asserted so the fix cannot "solve" AC7 by
+					//    making retirement destructive).
+					const retired = await retireSkill(tmpDir, slug, 'ac7-staleness');
+					expect(
+						retired.retired,
+						'precondition: retireSkill reported retired',
+					).toBe(true);
+					expect(
+						await fs.stat(markerPath).then(
+							() => true,
+							() => false,
+						),
+						'retireSkill must write retired.marker',
+					).toBe(true);
+					expect(
+						await fs.stat(skillPath).then(
+							() => true,
+							() => false,
+						),
+						'#1822: retireSkill leaves SKILL.md in place (reversible)',
+					).toBe(true);
+
+					// 3. Explicit revoke of C1 (the AC's "successful explicit revoke").
+					const revoke = JSON.parse(
+						await callTool(
+							external_skill_revoke,
+							{ candidate_id: c1, reason: 'ac7 revoke' },
+							tmpDir,
+						),
+					) as { success?: boolean };
+					expect(revoke.success, 'precondition: C1 revoke succeeded').toBe(
+						true,
+					);
+
+					// 4. Promote a DIFFERENT approved candidate into the same slug.
+					const promote2 = JSON.parse(
+						await callTool(
+							external_skill_promote,
+							{ candidate_id: c2, slug, approver: 'user' },
+							tmpDir,
+						),
+					) as { success?: boolean; error?: string };
+
+					// 5. AC7 contract: success ⇒ the propagation gate accepts the skill;
+					//    refusal ⇒ it happened BEFORE writing, with an actionable lifecycle
+					//    diagnostic and no SKILL.md left behind.
+					const gate = validateSkillReference(
+						tmpDir,
+						`file:.opencode/skills/generated/${slug}/SKILL.md`,
+						{},
+						{ enforceAudience: false },
+					);
+					if (promote2.success === true) {
+						expect(
+							gate.valid,
+							`promote reported success but the propagation gate refuses the new skill: ${gate.reason}`,
+						).toBe(true);
+					} else {
+						expect(typeof promote2.error).toBe('string');
+						expect(
+							promote2.error ?? '',
+							'refusal must name the lifecycle cause (retired marker)',
+						).toMatch(/retired|marker|lifecycle/iu);
+						expect(
+							await fs.stat(skillPath).then(
+								() => true,
+								() => false,
+							),
+							'a refused promotion must not leave a SKILL.md behind',
+						).toBe(false);
+					}
+				},
+				{ fixedNow: FIXED_NOW },
 			),
-		) as { success?: boolean };
-		expect(promote1.success, 'precondition: C1 promotion succeeded').toBe(true);
-
-		// 2. Curator retirement writes the marker and LEAVES SKILL.md (#1822
-		//    reversibility contract — asserted so the fix cannot "solve" AC7 by
-		//    making retirement destructive).
-		const retired = await retireSkill(tmpDir, slug, 'ac7-staleness');
-		expect(retired.retired, 'precondition: retireSkill reported retired').toBe(
-			true,
-		);
-		expect(
-			await fs.stat(markerPath).then(
-				() => true,
-				() => false,
-			),
-			'retireSkill must write retired.marker',
-		).toBe(true);
-		expect(
-			await fs.stat(skillPath).then(
-				() => true,
-				() => false,
-			),
-			'#1822: retireSkill leaves SKILL.md in place (reversible)',
-		).toBe(true);
-
-		// 3. Explicit revoke of C1 (the AC's "successful explicit revoke").
-		const revoke = JSON.parse(
-			await callTool(
-				external_skill_revoke,
-				{ candidate_id: c1, reason: 'ac7 revoke' },
-				tmpDir,
-			),
-		) as { success?: boolean };
-		expect(revoke.success, 'precondition: C1 revoke succeeded').toBe(true);
-
-		// 4. Promote a DIFFERENT approved candidate into the same slug.
-		const promote2 = JSON.parse(
-			await callTool(
-				external_skill_promote,
-				{ candidate_id: c2, slug, approver: 'user' },
-				tmpDir,
-			),
-		) as { success?: boolean; error?: string };
-
-		// 5. AC7 contract: success ⇒ the propagation gate accepts the skill;
-		//    refusal ⇒ it happened BEFORE writing, with an actionable lifecycle
-		//    diagnostic and no SKILL.md left behind.
-		const gate = validateSkillReference(
-			tmpDir,
-			`file:.opencode/skills/generated/${slug}/SKILL.md`,
-			{},
-			{ enforceAudience: false },
-		);
-		if (promote2.success === true) {
-			expect(
-				gate.valid,
-				`promote reported success but the propagation gate refuses the new skill: ${gate.reason}`,
-			).toBe(true);
-		} else {
-			expect(typeof promote2.error).toBe('string');
-			expect(
-				promote2.error ?? '',
-				'refusal must name the lifecycle cause (retired marker)',
-			).toMatch(/retired|marker|lifecycle/iu);
-			expect(
-				await fs.stat(skillPath).then(
-					() => true,
-					() => false,
-				),
-				'a refused promotion must not leave a SKILL.md behind',
-			).toBe(false);
-		}
-	}, 30_000);
+		30_000,
+	);
 });

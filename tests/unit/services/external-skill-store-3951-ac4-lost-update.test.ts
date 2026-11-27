@@ -42,6 +42,10 @@ import {
 } from '../../../src/services/external-skill-store.js';
 import { external_skill_reject } from '../../../src/tools/external-skill-reject.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
+import { withFrozenClockAsync } from '../../helpers/test-clock.js';
+
+/** Deterministic instant every clock read in this file is relative to. */
+const FIXED_NOW = 1_800_000_000_000;
 
 // ---------------------------------------------------------------------------
 // Helpers (shapes copied from tests/unit/tools/external-skill-reject.test.ts)
@@ -107,8 +111,9 @@ describe('external_skill_reject concurrent RMW — regression: lost update drops
 		}
 	});
 
-	test('two overlapping rejects with distinct reasons: each acknowledged rejection is persisted exactly once, or the conflicting call fails explicitly', async () => {
-		tmpDir = canonicalMkdtemp('ac4-lost-update-');
+	test('two overlapping rejects with distinct reasons: each acknowledged rejection is persisted exactly once, or the conflicting call fails explicitly', () =>
+		withFrozenClockAsync(async () => {
+			tmpDir = canonicalMkdtemp('ac4-lost-update-');
 		await writeTestConfig(tmpDir);
 
 		const store = createExternalSkillStore(tmpDir, { max_candidates: 500 });
@@ -117,7 +122,7 @@ describe('external_skill_reject concurrent RMW — regression: lost update drops
 			source_type: 'github',
 			publisher: 'trace-3951',
 			sha256: 'a'.repeat(64),
-			fetched_at: new Date(Date.now() - 60_000).toISOString(),
+			fetched_at: new Date(FIXED_NOW - 60_000).toISOString(),
 			skill_name: 'ac4-skill',
 			skill_body: 'body',
 			risk_flags: [],
@@ -247,5 +252,5 @@ describe('external_skill_reject concurrent RMW — regression: lost update drops
 				`acknowledged rejection "${reason}" must appear exactly once in persisted user-actor history; got ${occurrences} (ackA=${JSON.stringify(ackA)} ackB=${JSON.stringify(ackB)} persisted=${JSON.stringify(userReasons)})`,
 			).toBe(1);
 		}
-	}, 25_000);
+		}, { fixedNow: FIXED_NOW }), 25_000);
 });

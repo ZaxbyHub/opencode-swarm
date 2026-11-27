@@ -37,6 +37,10 @@ import {
 } from '../../../src/services/external-skill-store.js';
 import { external_skill_revoke } from '../../../src/tools/external-skill-revoke.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
+import { withFrozenClockAsync } from '../../helpers/test-clock.js';
+
+/** Deterministic instant every clock read in this file is relative to. */
+const FIXED_NOW = 1_800_000_000_000;
 
 const realReadFile = storeInternals.fs.readFile;
 const realUnlink = storeInternals.fs.unlink;
@@ -107,14 +111,15 @@ const tick = (): Promise<void> =>
 	new Promise((resolve) => setImmediate(resolve));
 
 describe('update vs delete contention — regression: an acknowledged delete resurrected by a stale in-flight update (#3951 AC4 / D2)', () => {
-	test('the update read→write window and the delete unlink window never overlap, and an acknowledged delete leaves the record gone', async () => {
+	test('the update read→write window and the delete unlink window never overlap, and an acknowledged delete leaves the record gone', () =>
+		withFrozenClockAsync(async () => {
 		const tmpDir = canonicalMkdtemp('store-mutations-contention-');
 		try {
 			const seeded = await seed(
 				tmpDir,
 				'racy',
 				'pending',
-				new Date().toISOString(),
+				new Date(FIXED_NOW).toISOString(),
 			);
 			const fp = candidateFile(tmpDir, seeded.id);
 			const store = createExternalSkillStore(tmpDir, { max_candidates: 500 });
@@ -262,7 +267,7 @@ describe('update vs delete contention — regression: an acknowledged delete res
 			restoreSeams();
 			await fs.rm(tmpDir, { recursive: true, force: true });
 		}
-	}, 30_000);
+		}, { fixedNow: FIXED_NOW }), 30_000);
 });
 
 /**
@@ -289,7 +294,8 @@ describe('evictIfNeeded protected-verdict re-check (#3951 AC4 / D2)', () => {
 		return out;
 	}
 
-	test('a victim that became protected between the list snapshot and the lock is SKIPPED, never deleted', async () => {
+	test('a victim that became protected between the list snapshot and the lock is SKIPPED, never deleted', () =>
+		withFrozenClockAsync(async () => {
 		const tmpDir = canonicalMkdtemp('store-mutations-evict-protected-');
 		try {
 			const [oldest] = await seedThree(tmpDir);
@@ -343,9 +349,10 @@ describe('evictIfNeeded protected-verdict re-check (#3951 AC4 / D2)', () => {
 			restoreSeams();
 			await fs.rm(tmpDir, { recursive: true, force: true });
 		}
-	}, 30_000);
+		}, { fixedNow: FIXED_NOW }), 30_000);
 
-	test('control: the same over-capacity fixture without the flip evicts exactly the oldest victim', async () => {
+	test('control: the same over-capacity fixture without the flip evicts exactly the oldest victim', () =>
+		withFrozenClockAsync(async () => {
 		const tmpDir = canonicalMkdtemp('store-mutations-evict-control-');
 		try {
 			const [oldest, mid, newest] = await seedThree(tmpDir);
@@ -363,11 +370,12 @@ describe('evictIfNeeded protected-verdict re-check (#3951 AC4 / D2)', () => {
 			restoreSeams();
 			await fs.rm(tmpDir, { recursive: true, force: true });
 		}
-	}, 30_000);
+		}, { fixedNow: FIXED_NOW }), 30_000);
 });
 
 describe('revoke post-unlink record failure — regression: a silently lost record update after the destructive unlink (#3951 AC4 / D2)', () => {
-	test('success:false + skill_file_removed:true + re-run remedy, then an idempotent second revoke completes the record', async () => {
+	test('success:false + skill_file_removed:true + re-run remedy, then an idempotent second revoke completes the record', () =>
+		withFrozenClockAsync(async () => {
 		const tmpDir = canonicalMkdtemp('store-mutations-revoke-partial-');
 		try {
 			await writeTestConfig(tmpDir);
@@ -387,7 +395,7 @@ describe('revoke post-unlink record failure — regression: a silently lost reco
 				tmpDir,
 				slug,
 				'promoted',
-				new Date().toISOString(),
+				new Date(FIXED_NOW).toISOString(),
 			);
 			const fp = candidateFile(tmpDir, record.id);
 			await storeInternals.atomicWriteFile(
@@ -395,9 +403,9 @@ describe('revoke post-unlink record failure — regression: a silently lost reco
 				JSON.stringify({
 					...record,
 					evaluation_history: [
-						{
-							verdict: 'promoted',
-							timestamp: new Date().toISOString(),
+					{
+						verdict: 'promoted',
+						timestamp: new Date(FIXED_NOW).toISOString(),
 							actor: 'user',
 							reason: 'Promoted',
 							target_path: skillPath,
@@ -483,10 +491,10 @@ describe('revoke post-unlink record failure — regression: a silently lost reco
 				(done?.evaluation_history ?? []).filter(
 					(e) => e.actor === 'user' && e.verdict === 'revoked',
 				),
-			).toHaveLength(1);
+				).toHaveLength(1);
 		} finally {
 			restoreSeams();
 			await fs.rm(tmpDir, { recursive: true, force: true });
 		}
-	}, 30_000);
+		}, { fixedNow: FIXED_NOW }), 30_000);
 });
