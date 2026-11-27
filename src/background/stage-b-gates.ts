@@ -28,8 +28,8 @@ import {
 	type ReviewRouteEvidence,
 	readReviewRouteReceiptSync,
 } from '../review/routing-enforcement.js';
-import { isPathIdentityWithin } from '../scope/path-identity.js';
 import { isStageBRouteCompleteAtSettlement } from '../review/stage-b-route-settlement.js';
+import { isPathIdentityWithin } from '../scope/path-identity.js';
 import { canonicalWorkspaceIdentity } from '../scope/scope-binding.js';
 import {
 	type AgentSessionState,
