@@ -16,4 +16,4 @@ None. Additive event payload fields; consumers keying on `type`/`skills_missing`
 
 ## Discovery context
 
-The Wirtschaftssimulation `swarm_communication_debug.md` §3.5/§7.5 candidate issue (2026-11-23): `skills_missing: true` warnings on nearly every astra_architect→agent dispatch while `available_skills` listed `.claude/skills/keep-the-why/SKILL.md`, with the report noting "the event shape does not distinguish 'dispatch omitted the SKILLS field' from 'the hook failed to match the referenced skill'". Pinned by the updated warn tests and the new inline-trace tests in `tests/unit/hooks/skill-propagation-gate.test.ts`.
+The consumer-project `swarm_communication_debug.md` §3.5/§7.5 candidate issue (2026-11-23): `skills_missing: true` warnings on nearly every astra_architect→agent dispatch while `available_skills` listed `.claude/skills/keep-the-why/SKILL.md`, with the report noting "the event shape does not distinguish 'dispatch omitted the SKILLS field' from 'the hook failed to match the referenced skill'". Pinned by the updated warn tests and the new inline-trace tests in `tests/unit/hooks/skill-propagation-gate.test.ts`.

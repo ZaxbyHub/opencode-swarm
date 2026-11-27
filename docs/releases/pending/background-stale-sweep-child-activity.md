@@ -3,7 +3,7 @@
 ## What
 
 Closes the task 2.15 liveness wedge from a consumer project's
-`.swarm/swarm_communication_debug.md` (2026-11-26, Wirtschaftssimulation).
+`.swarm/swarm_communication_debug.md` (2026-11-26, consumer-project).
 The background delegation stale sweep flipped a `pending`/`running` record
 to `stale` (failure class `liveness`) when its STORE `updatedAt` was older
 than the sweep timeout — but a live child's activity never writes the

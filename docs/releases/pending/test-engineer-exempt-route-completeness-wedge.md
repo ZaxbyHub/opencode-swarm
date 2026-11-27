@@ -10,7 +10,7 @@
 
 ## Why
 
-Found in the Wirtschaftssimulation loop (session `29b8ccea-6226-4e7d-821a-4486276d1f20`, task 1.8): the task's scope was exclusively `AGENTS.md`, the durable evidence recorded `test_engineer_exempt: true` with `required_gates: ["reviewer"]` (both satisfied), but the persisted route receipt for the dispatching session demanded 1 reviewer + 1 test engineer, so `routeCompleteForPersistence` was `false` and the workflow stayed at `reviewer_run` after the reviewer's APPROVED verdict.
+Found in the consumer-project loop (session `29b8ccea-6226-4e7d-821a-4486276d1f20`, task 1.8): the task's scope was exclusively `AGENTS.md`, the durable evidence recorded `test_engineer_exempt: true` with `required_gates: ["reviewer"]` (both satisfied), but the persisted route receipt for the dispatching session demanded 1 reviewer + 1 test engineer, so `routeCompleteForPersistence` was `false` and the workflow stayed at `reviewer_run` after the reviewer's APPROVED verdict.
 
 Trust note: the exemption is read from the unauthenticated `.swarm/evidence/<task>.json` (no MAC); it is not backed by the route receipt chain. The dispatch site MACs the route receipt after zeroing the test-engineer slots from that flag.
 

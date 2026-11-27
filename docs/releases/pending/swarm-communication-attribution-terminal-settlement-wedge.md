@@ -4,7 +4,7 @@
 
 Closes the swarm-internal communication failure patterns documented in a
 consumer project's `.swarm/swarm_communication_debug.md` (2026-11-23,
-Wirtschaftssimulation): a green `pre_check_batch` that could not be attributed
+consumer-project): a green `pre_check_batch` that could not be attributed
 after a terminal coder settlement, `phase_complete` reporting
 `REQUIRED_AGENTS_MISSING` with `agentsDispatched: []` although every Stage B
 role had demonstrably run, the architect being unable to write the plugin's

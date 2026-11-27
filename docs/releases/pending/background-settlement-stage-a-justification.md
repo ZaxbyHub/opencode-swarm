@@ -3,7 +3,7 @@
 ## What
 
 Closes the task 2.14 wedge from a consumer project's
-`.swarm/swarm_communication_debug.md` (2026-11-26, Wirtschaftssimulation):
+`.swarm/swarm_communication_debug.md` (2026-11-26, consumer-project):
 a background-dispatched coder round ran to a completed terminal, settled its
 coder settlement, and was durably consumed with ingestion outcome
 `accepted` — while attributing ZERO files, because the deliverable had

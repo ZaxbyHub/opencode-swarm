@@ -1,8 +1,0 @@
-{
-  "$schema": "https://opencode.ai/config.json",
-  "default_agent": "build",
-  "permissions": [
-    { "action": "shell", "resource": "git push *", "effect": "ask" },
-    { "action": "shell", "resource": "git reset --hard *", "effect": "ask" }
-  ]
-}

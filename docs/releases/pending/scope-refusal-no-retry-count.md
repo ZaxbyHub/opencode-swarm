@@ -3,7 +3,7 @@
 ## What
 
 Closes the task 2.16 retry-circuit wedge from a consumer project's
-`.swarm/swarm_communication_debug.md` (2026-11-26, Wirtschaftssimulation).
+`.swarm/swarm_communication_debug.md` (2026-11-26, consumer-project).
 The delegation gate's `prepareCoderScope` catch wrote a
 `dispatch_no_mutation` retry-accounting transition for EVERY
 scope-preparation error — even though a refused dispatch never ran a

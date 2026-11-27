@@ -4,7 +4,7 @@
 
 Closes three completion-side layers of the restart-era agent-gate wedge
 documented in a consumer project's `.swarm/swarm_communication_debug.md`
-(2026-11-24/25, Wirtschaftssimulation). All three are evidence-backed from
+(2026-11-24/25, consumer-project). All three are evidence-backed from
 the consumer's delegation store, session exports, mtime forensics and the
 opencode v2.3.2 host source; the first two are additionally proven in
 production (server pid 585451 running these fixes: the reviewer and

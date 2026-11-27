@@ -126,7 +126,7 @@ describe('issue #2098 completion recovery capabilities', () => {
 });
 
 describe('issue #2098 completion recovery — Code Mode wrapper pass-through', () => {
-	// Regression (live session, 2026-11-22, Wirtschaftssimulation): the
+	// Regression (live session, 2026-11-22, consumer-project): the
 	// completion gate judged the outer Code Mode `execute` wrapper as an
 	// opaque non-read-only tool, so once a task reached tests_run it denied
 	// every plugin call — including the update_task_status remedy its own

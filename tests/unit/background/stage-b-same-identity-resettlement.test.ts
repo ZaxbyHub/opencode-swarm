@@ -1,5 +1,5 @@
 /**
- * Regression (Wirtschaftssimulation 2026-11-25, task 2.20 Gen 8/9 — the
+ * Regression (consumer-project 2026-11-25, task 2.20 Gen 8/9 — the
  * post-catch-22 accumulation wedge): after the tests_run required-gate
  * counting fix, a task that legitimately re-settles the SAME gate identity
  * twice in one serve instance (recover_* opening → re-dispatch, no restart

@@ -1,5 +1,5 @@
 /**
- * Regression (Wirtschaftssimulation session e07a3a7a, task 1.8): a Stage-B
+ * Regression (consumer-project session e07a3a7a, task 1.8): a Stage-B
  * re-dispatch could never unwedge a durably pinned reviewer_run task.
  *
  * Field shape: the pre-exemption reviewer settlement recorded gates.reviewer

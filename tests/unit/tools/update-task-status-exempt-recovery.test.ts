@@ -33,7 +33,7 @@ afterEach(() => {
 });
 
 /**
- * Seed the exempt wedge shape (Wirtschaftssimulation task 1.8): a docs-only
+ * Seed the exempt wedge shape (consumer-project task 1.8): a docs-only
  * task whose durable evidence proves test_engineer_exempt, whose reviewer
  * gate passed, but whose workflow state is pinned at reviewer_run because
  * the Stage-B completeness barrier recorded routeComplete: false.

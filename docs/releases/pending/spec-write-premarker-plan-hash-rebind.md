@@ -11,7 +11,7 @@ agent) instead of only pointing at `/swarm clarify`, which is not a
 
 ## Why
 
-Field wedge (Wirtschaftssimulation session, 2026-11-22): the drift marker is
+Field wedge (consumer-project session, 2026-11-22): the drift marker is
 written lazily by the next `loadPlan`, which runs *after* a canonical spec
 write. So the natural repair sequence always deadlocked:
 

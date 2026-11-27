@@ -1,6 +1,6 @@
 /**
  * Terminal-settlement Stage A wedge attribution (the 2026-11-23
- * swarm_communication_debug pattern, Wirtschaftssimulation task 1.8).
+ * swarm_communication_debug pattern, consumer-project task 1.8).
  *
  * A task whose COMMITTED coder settlement settled terminal (accepted or
  * no-mutation) while its workflow sits at idle/blocked can never receive the

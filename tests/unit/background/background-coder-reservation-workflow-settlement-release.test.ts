@@ -2,7 +2,7 @@
  * Regression: a workflow-settled coder launch must not hold its background
  * reservation forever (2026-11-27 task 2.18 stale-reservation wedge).
  *
- * Wild failure (Wirtschaftssimulation session): a background repair coder
+ * Wild failure (consumer-project session): a background repair coder
  * finished its work and the architect durably settled its coder settlement —
  * `.swarm/coder-settlements/2.18.json` at `state: 'COMMITTED'`,
  * `accepted: true`, `transitionId: 'coder:<callID>'` — but the delegation
