@@ -95,7 +95,7 @@ export async function executePruneCommunicationLog(
 			removed_headline: result.headline,
 			task_ids: result.taskIds,
 			audited:
-				'communication_log_pruned (cause: ai_released) → .swarm/events.jsonl',
+				'communication_log_pruned (cause: ai_released) → core event store',
 		});
 	}
 	if (result.outcome === 'refused_open') {
@@ -126,7 +126,7 @@ export async function executePruneCommunicationLog(
 export const prune_communication_log: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			'Maintain the swarm communication debug log lifecycle: report the AI-release worklist (no arguments), or remove one specific closed-but-unproven `## Vorfall` entry with an audited reason. Closed incidents whose every named task is durably complete (evidence state complete) are pruned automatically by the session-close maintenance pass; this tool is the explicit AI decision surface for everything else — closed entries whose task is not provably complete, entries without a Status line. Open incidents are always refused. Every removal is audited to .swarm/events.jsonl (communication_log_pruned).',
+			'Maintain the swarm communication debug log lifecycle: report the AI-release worklist (no arguments), or remove one specific closed-but-unproven `## Vorfall` entry with an audited reason. Closed incidents whose every named task is durably complete (evidence state complete) are pruned automatically by the session-close maintenance pass; this tool is the explicit AI decision surface for everything else — closed entries whose task is not provably complete, entries without a Status line. Open incidents are always refused. Every removal is audited to the core event store (communication_log_pruned).',
 		args: {
 			entry_headline: PruneCommunicationLogArgsSchema.shape.entry_headline,
 			reason: PruneCommunicationLogArgsSchema.shape.reason,
