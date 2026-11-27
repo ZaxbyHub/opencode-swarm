@@ -183,12 +183,17 @@ describe('PrMonitorWorker — terminal event latch (#3947)', () => {
 	test('re-emits pr.closed after a reopen-then-close sequence', async () => {
 		snapshot
 			.mockImplementationOnce(async () => snapshotFor('CLOSED'))
+			.mockImplementationOnce(async () => snapshotFor('CLOSED'))
 			.mockImplementationOnce(async () => snapshotFor('OPEN'))
 			.mockImplementationOnce(async () => snapshotFor('CLOSED'));
 		const worker = createWorker({ auto_unsubscribe_on_close: false });
 		await worker.pollCycle();
 		await worker.pollCycle();
+		// Latch active: the repeated CLOSED poll did not re-emit.
+		expect(count('pr.closed')).toBe(1);
 		await worker.pollCycle();
+		await worker.pollCycle();
+		// Reopen cleared the latch, so the second close emits afresh.
 		expect(count('pr.closed')).toBe(2);
 	});
 
@@ -196,6 +201,9 @@ describe('PrMonitorWorker — terminal event latch (#3947)', () => {
 		snapshot.mockImplementation(async () => snapshotFor('MERGED'));
 		const worker = createWorker({ auto_unsubscribe_on_merge: false });
 		await worker.pollCycle();
+		await worker.pollCycle();
+		// Latch active before stop().
+		expect(count('pr.merged')).toBe(1);
 		// stop() is a no-op unless the worker was started.
 		worker.start();
 		worker.stop();
