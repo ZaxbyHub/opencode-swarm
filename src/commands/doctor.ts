@@ -428,7 +428,9 @@ export async function handleDoctorCommand(
 				output += `, ${skipped.length} skipped (unsafe manifest name — entry left untouched)`;
 			}
 			output += rollback.drained
-				? '. Batch fully drained and removed.\n'
+				? rollback.batchDirRetained
+					? '. Batch fully drained; directory retained (unowned files present — nothing was deleted).\n'
+					: '. Batch fully drained and removed.\n'
 				: '. Batch retained (unresolved entries).\n';
 			// Skipped entries (#3836): one bounded line each, with the
 			// neutralized name and its reason, so the operator sees exactly

@@ -78,10 +78,12 @@ export const _internals = {
 		// remains honestly non-atomic (same stance as the in-code comment at
 		// the call site — narrowed, not eliminated).
 		if (typeof options?.expectedDigest === 'string') {
-			// FB-210 semantics: only a MISSING file skips the guard (the
-			// idempotent-removal path below returns false); anything else that
-			// is not a regular readable file whose digest matches is a
-			// refusal — never a mismatch claim and never a revoke (#3951).
+			// FB-210 semantics: only a MISSING file skips the digest check —
+			// and under the guard, absence is TERMINAL (round-3 review): an
+			// absent observation must not authorize a later unlink, because a
+			// replacement created after the probe would be deleted unverified.
+			// The idempotent false is returned directly; true stays reserved
+			// for a verified removal.
 			const probe = await _internals.lstatTarget(filePath);
 			if (probe.kind === 'file') {
 				const guard = await readTargetBounded(
@@ -101,7 +103,9 @@ export const _internals = {
 						{ observed: digest, expected: options.expectedDigest },
 					);
 				}
-			} else if (probe.kind !== 'missing') {
+			} else if (probe.kind === 'missing') {
+				return false;
+			} else {
 				throw new SkillFileDigestMismatchError(
 					`Refusing to remove the promoted skill file at ${filePath}: the pre-removal identity check found ${probe.kind === 'error' ? `an inspection error (${probe.code ?? 'unknown'})` : `a ${probe.kind}`} instead of a regular file. File left in place; candidate left at its recorded verdict.`,
 					{ observed: `<${probe.kind}>`, expected: options.expectedDigest },
@@ -549,14 +553,30 @@ export const external_skill_revoke: ReturnType<typeof createSwarmTool> =
 					return JSON.stringify({
 						success: false,
 						candidate_id: candidateId,
-						skill_file_removed: true,
-						error: `Skill file removed, but the candidate record update failed: ${updateMessage}. Re-run revoke to complete the record update (the file removal is idempotent).`,
+						// Round-3 review: report the OBSERVED removal outcome,
+						// not an unconditional true — a refused/missing removal
+						// that also fails its record update is a refusal state,
+						// not a removed-file state.
+						skill_file_removed: skillFileRemoved,
+						error: `Skill file removal outcome: ${skillFileRemoved ? 'removed' : 'not removed (absent or refused)'}; the candidate record update failed: ${updateMessage}. Re-run revoke to complete the record update (the file removal is idempotent).`,
+					});
+				}
+				if (updated === null) {
+					// Round-3 review: the record vanished mid-revoke (concurrent
+					// delete won). The file outcome stands; there is no record
+					// left to stamp — report it honestly instead of
+					// dereferencing null through the generic failure handler.
+					return JSON.stringify({
+						success: false,
+						candidate_id: candidateId,
+						skill_file_removed: skillFileRemoved,
+						error: `Skill file removal outcome: ${skillFileRemoved ? 'removed' : 'not removed (absent or refused)'}; the candidate record no longer exists (concurrent deletion?) — no audit record to update.`,
 					});
 				}
 
 				return JSON.stringify({
 					success: true,
-					candidate_id: updated!.id,
+					candidate_id: updated.id,
 					evaluation_verdict: 'revoked',
 					skill_file_removed: skillFileRemoved,
 				});

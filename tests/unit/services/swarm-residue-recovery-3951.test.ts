@@ -24,10 +24,18 @@ const FROZEN_LATER = { fixedNow: FIXED_NOW + 60_000 };
 let reverseBlock = new Set<string>();
 // Captured BEFORE registration: mock.module mutates the live node:fs namespace, so a call-time read would hit this very override (self-recursion).
 const REAL_RENAME_SYNC = realFs.renameSync;
+const REAL_LINK_SYNC = realFs.linkSync;
 
 mock.module('node:fs', () => ({
 	...realFs,
 	renameSync: (from: string | URL, to: string | URL): void => {
+		const f = String(from);
+		const t = String(to);
+		REAL_RENAME_SYNC(f, t);
+	},
+	// Reverse moves commit via the no-replace hard-link path (round-4): the
+	// reverse-failure fault fires HERE, on quarantine→ORIGINAL links only.
+	linkSync: (from: string | URL, to: string | URL): void => {
 		const f = String(from);
 		const t = String(to);
 		const q = `${path.sep}quarantine${path.sep}`;
@@ -37,12 +45,12 @@ mock.module('node:fs', () => ({
 			!t.includes(q)
 		) {
 			const err = new Error(
-				`EPERM: operation not permitted, rename '${f}' -> '${t}'`,
+				`EPERM: operation not permitted, link '${f}' -> '${t}'`,
 			) as NodeJS.ErrnoException;
 			err.code = 'EPERM';
 			throw err;
 		}
-		REAL_RENAME_SYNC(f, t);
+		REAL_LINK_SYNC(f, t);
 	},
 }));
 

@@ -677,6 +677,12 @@ export interface RollbackResult {
 	 * for manual recovery). Optional for backward compatibility.
 	 */
 	skippedBatches?: string[];
+	/**
+	 * #3951 round 3 — true when every manifest entry resolved but the batch
+	 * dir was RETAINED because it holds unowned (foreign) content the
+	 * recursive cleanup must not delete. Optional for backward compatibility.
+	 */
+	batchDirRetained?: boolean;
 }
 
 /** Manifest surface names (#3951 recovery design). */
@@ -703,10 +709,12 @@ function batchDirContainsOnlyMetadata(batchAbs: string): boolean {
 		BATCH_RECOVERY_MANIFEST,
 		ROLLBACK_ATTEMPTED_MARKER,
 	]);
-	const METADATA_PREFIXES = [
-		`${BATCH_MANIFEST}.`,
-		`${BATCH_RECOVERY_MANIFEST}.`,
-	]; // atomic-write temps: <name>.<suffix>.tmp
+	// Atomic-write temps ONLY in their documented grammar
+	// `<target>.<hex32>.tmp` (src/utils/atomic-write.ts:952-957) — a bare
+	// prefix match would admit foreign lookalikes such as
+	// `manifest.json.operator-notes.txt` (round-3 review probe).
+	const METADATA_TEMP =
+		/^(manifest\.json|manifest\.recovery\.json)\.[0-9a-f]{32}\.tmp$/;
 	let onlyMetadata = true;
 	const walk = (dir: string): void => {
 		let entries: fs.Dirent[];
@@ -718,22 +726,25 @@ function batchDirContainsOnlyMetadata(batchAbs: string): boolean {
 		}
 		for (const entry of entries) {
 			if (entry.isDirectory()) {
-				// The injected failure artifact is a DIRECTORY named
-				// manifest.json; other directories are foreign content.
-				if (entry.name === BATCH_MANIFEST) {
+				// The injected failure artifacts are DIRECTORIES occupying the
+				// manifest surface NAMES (manifest.json / manifest.recovery.json
+				// as directories make the atomic write fail on both platforms);
+				// other directories are foreign content.
+				if (
+					entry.name === BATCH_MANIFEST ||
+					entry.name === BATCH_RECOVERY_MANIFEST
+				) {
 					walk(path.join(dir, entry.name));
 				} else {
 					onlyMetadata = false;
 				}
 				continue;
 			}
-			// Exact names and provenance-prefixed temps ONLY — a bare
-			// `*.tmp` suffix would admit foreign temp files to the recursive
-			// cleanup (round-2 review finding: the atomic-write leftovers are
-			// already covered by METADATA_PREFIXES).
+			// Exact names and grammar-matched atomic-write temps ONLY — a bare
+			// suffix or prefix match would admit foreign files to the recursive
+			// cleanup (round-2/3 review findings).
 			const isMetadata =
-				METADATA_NAMES.has(entry.name) ||
-				METADATA_PREFIXES.some((p) => entry.name.startsWith(p));
+				METADATA_NAMES.has(entry.name) || METADATA_TEMP.test(entry.name);
 			if (!isMetadata) onlyMetadata = false;
 		}
 	};
@@ -807,12 +818,19 @@ function compensateQuarantineBatch(
 		}
 		try {
 			fs.mkdirSync(path.dirname(originalAbs), { recursive: true });
-			// Shared rename seam (raw-rename ratchet #2969): also the injection
-			// point for reverse-move-failure tests of this compensation.
-			_internals.renameResidueEntry(storedAbs, originalAbs);
+			// No-replace commit (round-3 review probe): a hard link fails with
+			// EEXIST when a concurrent writer recreated the original after the
+			// inspection above — the winner's bytes are never overwritten and
+			// the stored copy stays quarantined (classified as a collision).
+			fs.linkSync(storedAbs, originalAbs);
+			fs.unlinkSync(storedAbs);
 			restored.push(entry.original_rel_path);
-		} catch {
-			uncompensated.push(entry.original_rel_path);
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+				collisions.push(entry.original_rel_path); // never overwrite
+			} else {
+				uncompensated.push(entry.original_rel_path);
+			}
 		}
 	}
 	return { restored, uncompensated, collisions };
@@ -1067,24 +1085,55 @@ export async function rollbackResidueQuarantine(
 			continue;
 		}
 		fs.mkdirSync(path.dirname(originalAbs), { recursive: true });
-		fs.renameSync(storedAbs, originalAbs);
+		// No-replace commit (round-3 review class): a hard link fails with
+		// EEXIST when a concurrent writer recreated the original after the
+		// existence check above — the winner's bytes are never overwritten;
+		// the stored copy stays for a later explicit attempt.
+		try {
+			fs.linkSync(storedAbs, originalAbs);
+			fs.unlinkSync(storedAbs);
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+				items.push({ relPath: originalRel, status: 'collision' });
+				allResolved = false;
+				continue;
+			}
+			throw err;
+		}
 		items.push({ relPath: originalRel, status: 'restored' });
 	}
 	if (allResolved) {
-		try {
-			fs.rmSync(batchAbs, { recursive: true, force: true });
-		} catch {
-			// best-effort cleanup; payloads are already restored
+		// Foreign-content guard (round-3 review probe): allResolved speaks only
+		// for MANIFEST entries — a file in the batch dir that no manifest
+		// lists is unowned content and must never be recursively deleted.
+		// The drained batch dir is removed only when it holds nothing beyond
+		// owned metadata; otherwise it is retained and reported.
+		let batchDirRetained = false;
+		if (batchDirContainsOnlyMetadata(batchAbs)) {
+			try {
+				fs.rmSync(batchAbs, { recursive: true, force: true });
+			} catch {
+				// best-effort cleanup; payloads are already restored
+			}
+			// The drained batch's parent-sibling recovery manifest is orphaned
+			// metadata once the batch dir is gone — remove it too (#3951).
+			try {
+				fs.rmSync(parentSiblingRecoveryPath(swarmRoot, selected), {
+					force: true,
+				});
+			} catch {
+				/* best-effort */
+			}
+		} else {
+			batchDirRetained = true;
 		}
-		// The drained batch's parent-sibling recovery manifest is orphaned
-		// metadata once the batch dir is gone — remove it too (#3951).
-		try {
-			fs.rmSync(parentSiblingRecoveryPath(swarmRoot, selected), {
-				force: true,
-			});
-		} catch {
-			/* best-effort */
-		}
+		return {
+			batchRelDir: path.posix.join('quarantine', selected),
+			items,
+			drained: allResolved,
+			batchDirRetained,
+			skippedBatches,
+		};
 	} else if (batchId === undefined) {
 		// Default-path advancement marker (#3951 plan v4): record that THIS
 		// default attempt left the batch unresolved, so the NEXT default

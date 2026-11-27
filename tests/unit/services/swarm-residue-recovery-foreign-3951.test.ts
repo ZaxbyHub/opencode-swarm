@@ -13,9 +13,9 @@
 import { expect, mock, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import * as realFs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { withFrozenClockAsync } from '../../helpers/test-clock.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 /** Deterministic instant every clock read in this file is relative to. */
 const FIXED_NOW = 1_800_000_000_000;
@@ -29,9 +29,7 @@ test(
 	() =>
 		withFrozenClockAsync(
 			async () => {
-				const tmp = realFs.realpathSync(
-					realFs.mkdtempSync(path.join(os.tmpdir(), 'ac5-foreign-')),
-				);
+				const tmp = canonicalMkdtemp('ac5-foreign-');
 				const swarmRoot = path.join(tmp, '.swarm');
 				realFs.mkdirSync(swarmRoot, { recursive: true });
 				const git = spawnSync('git', ['init', '--quiet'], {
