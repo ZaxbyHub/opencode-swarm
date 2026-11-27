@@ -10,12 +10,18 @@
  * overridden, and every non-faulted rename delegates to the pre-captured
  * real function.
  */
-import { expect, mock, test } from 'bun:test';
+import { afterEach, expect, mock, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import * as realFs from 'node:fs';
 import * as path from 'node:path';
 import { withFrozenClockAsync } from '../../helpers/test-clock.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
+
+// The node:fs mock is registered per test and restored inside each finally;
+// this hook is the check:mock-cleanup backstop so a thrown test cannot leak it.
+afterEach(() => {
+	mock.restore();
+});
 
 /** Deterministic instant every clock read in this file is relative to. */
 const FIXED_NOW = 1_800_000_000_000;
