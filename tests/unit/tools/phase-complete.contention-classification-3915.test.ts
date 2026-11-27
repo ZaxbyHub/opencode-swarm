@@ -40,8 +40,8 @@ import * as realFileLocks from '../../../src/parallel/file-locks';
 import { resetSwarmState, swarmState } from '../../../src/state';
 import { executePhaseComplete } from '../../../src/tools/phase-complete';
 import { safeRmRecursive } from '../../helpers/safe-test-dir';
-import { canonicalMkdtemp } from '../../helpers/tmpdir';
 import { withFrozenClock } from '../../helpers/test-clock';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 // -----------------------------------------------------------------------
 // Module-level mocks — MUST be before any import of the mocked modules.

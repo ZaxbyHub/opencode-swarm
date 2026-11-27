@@ -29,8 +29,8 @@ import * as path from 'node:path';
 import { resetSwarmState, swarmState } from '../../../src/state';
 import { executePhaseComplete } from '../../../src/tools/phase-complete';
 import { safeRmRecursive } from '../../helpers/safe-test-dir';
-import { canonicalMkdtemp } from '../../helpers/tmpdir';
 import { withFrozenClock } from '../../helpers/test-clock';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 // -----------------------------------------------------------------------
 // Module-level mocks — MUST be before any import of the mocked modules.
@@ -382,20 +382,22 @@ describe('phase_complete contention classification negatives (#3915 AC5)', () =>
 		// preflight and the locked re-run: the plan-lock acquisition call is
 		// the deterministic interleaving point.
 		withFrozenClock(() => {
-			mockTryAcquireLock.mockImplementation((_dir: string, filePath: string) => {
-				if (filePath === 'plan.json') holdReceiptLock(tempDir);
-				return {
-					acquired: true,
-					lock: {
-						filePath,
-						agent: 'phase-complete',
-						taskId: 'phase-complete-plan-test',
-						timestamp: new Date().toISOString(),
-						expiresAt: Date.now() + 300_000,
-						_release: vi.fn().mockResolvedValue(undefined),
-					},
-				};
-			});
+			mockTryAcquireLock.mockImplementation(
+				(_dir: string, filePath: string) => {
+					if (filePath === 'plan.json') holdReceiptLock(tempDir);
+					return {
+						acquired: true,
+						lock: {
+							filePath,
+							agent: 'phase-complete',
+							taskId: 'phase-complete-plan-test',
+							timestamp: new Date().toISOString(),
+							expiresAt: Date.now() + 300_000,
+							_release: vi.fn().mockResolvedValue(undefined),
+						},
+					};
+				},
+			);
 		});
 
 		const parsed = JSON.parse(

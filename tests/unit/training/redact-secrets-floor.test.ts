@@ -30,8 +30,8 @@ import {
 	readTrainingVault,
 	_internals as vaultInternals,
 } from '../../../src/training/vault';
-import { canonicalMkdtemp } from '../../helpers/tmpdir';
 import { withFrozenClock } from '../../helpers/test-clock';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const A36 = 'A'.repeat(36);
 const PEM_BLOCK = `-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA${A36}\n-----END RSA PRIVATE KEY-----`;
