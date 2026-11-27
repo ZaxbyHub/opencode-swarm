@@ -727,10 +727,13 @@ function batchDirContainsOnlyMetadata(batchAbs: string): boolean {
 				}
 				continue;
 			}
+			// Exact names and provenance-prefixed temps ONLY — a bare
+			// `*.tmp` suffix would admit foreign temp files to the recursive
+			// cleanup (round-2 review finding: the atomic-write leftovers are
+			// already covered by METADATA_PREFIXES).
 			const isMetadata =
 				METADATA_NAMES.has(entry.name) ||
-				METADATA_PREFIXES.some((p) => entry.name.startsWith(p)) ||
-				entry.name.endsWith('.tmp');
+				METADATA_PREFIXES.some((p) => entry.name.startsWith(p));
 			if (!isMetadata) onlyMetadata = false;
 		}
 	};

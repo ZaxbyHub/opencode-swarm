@@ -22,6 +22,7 @@ const FIXED_NOW = 1_800_000_000_000;
 
 const hex = (c: string) => c.repeat(32);
 const FOREIGN = 'operator-drop.log';
+const FOREIGN_TMP = 'operator-data.tmp';
 
 test(
 	'foreign file in the batch dir blocks the post-compensation cleanup',
@@ -52,7 +53,9 @@ test(
 				await mock.module('node:fs', () => ({
 					...realFs,
 					renameSync: (from: string, to: string) => {
-						// (a) Plant a FOREIGN file in the batch dir on the first forward move.
+						// (a) Plant FOREIGN files in the batch dir on the first forward
+						// move: one plain-named, one wearing the .tmp suffix (round-2
+						// review: a bare *.tmp must NOT be treated as owned metadata).
 						if (
 							!planted &&
 							to.includes(`${path.sep}quarantine${path.sep}`) &&
@@ -62,6 +65,11 @@ test(
 							realFs.writeFileSync(
 								path.join(path.dirname(to), FOREIGN),
 								'foreign',
+								'utf-8',
+							);
+							realFs.writeFileSync(
+								path.join(path.dirname(to), FOREIGN_TMP),
+								'foreign-tmp',
 								'utf-8',
 							);
 						}
@@ -114,6 +122,9 @@ test(
 						.find((d) => realFs.existsSync(path.join(d, FOREIGN)));
 					expect(batchDir).toBeDefined(); // the batch dir SURVIVED the cleanup
 					expect(realFs.existsSync(path.join(batchDir!, FOREIGN))).toBe(true); // foreign file preserved
+					expect(realFs.existsSync(path.join(batchDir!, FOREIGN_TMP))).toBe(
+						true,
+					); // foreign .tmp preserved too (round-2)
 					// The payload itself was compensated back to its original path.
 					expect(
 						realFs.readFileSync(path.join(swarmRoot, tempRel), 'utf-8'),
