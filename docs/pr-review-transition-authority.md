@@ -172,7 +172,7 @@ instead of through a censused authority.
 | src/background/pending-delegations.ts:claimTerminalResult | :4997 | appendRecord (delegation store raw writer) | inventory | routed | the terminal-claim authority body; the append it performs is the scan-classified authority itself |
 | src/background/pending-delegations.ts:compactBackgroundDelegations | :2862 | compactDelegationsLocked | scan | routed | the public checkpoint/ledger compaction wrapper |
 | src/background/pending-delegations.ts:ensureDelegationCoordinationImported | :1612, :1658 | coordination import plus shadow projection | scan | deliberate-second-authority | replication-only: one-time import of already-decided records into the coordination DB, then projection repair |
-| src/background/pending-delegations.ts:maintainBackgroundDelegations | :8944 | sweepStaleDelegations | scan | routed | startup/session maintenance sweep through the sweep authority |
+| src/background/pending-delegations.ts:maintainBackgroundDelegations | :8986 | sweepStaleDelegations | scan | routed | startup/session maintenance sweep through the sweep authority |
 | src/background/pending-delegations.ts:maybeCompactDelegationsLocked | :3215 | compactDelegationsLocked | scan | routed | high-water compaction trigger for the checkpoint/ledger writer |
 | src/background/pending-delegations.ts:preparePendingBackgroundAdvisories | :6710 | appendRecord (delegation store raw writer) | inventory | routed | advisory payload preparation; no terminal status |
 | src/background/pending-delegations.ts:promoteDelegationFallback | :7663 | appendRecord (delegation store raw writer) | inventory | routed | recovery surface re-appending an already-decided record from the fallback store |
