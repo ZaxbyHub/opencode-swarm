@@ -380,14 +380,21 @@ export class SpecStreamProvider implements WebSearchProvider {
 		url.searchParams.set('q', query);
 		url.searchParams.set('num', String(maxResults));
 
-		let response: Response;
 		const timeoutError = new WebSearchError(
 			`SpecStream search timed out after ${SEARCH_TIMEOUT_MS}ms`,
 		);
+		type Outcome =
+			| { kind: 'http'; status: number }
+			| { kind: 'json-error'; error: unknown }
+			| { kind: 'ok'; body: unknown };
+		let outcome: Outcome;
 		try {
-			response = await withTimeoutSignal(
-				(signal) =>
-					fetch(url.toString(), {
+			// The body is read inside the deadline: withTimeoutSignal stops its timer
+			// once the awaited operation settles, so a server that sends headers and
+			// then stalls the body must not be able to outlive it.
+			outcome = await withTimeoutSignal<Outcome>(
+				async (signal) => {
+					const res = await fetch(url.toString(), {
 						method: 'GET',
 						headers: {
 							Authorization: `Bearer ${this.apiKey}`,
@@ -397,7 +404,14 @@ export class SpecStreamProvider implements WebSearchProvider {
 						// The Authorization header must never follow a redirect off
 						// api.specstream.ai (same policy as Keenable).
 						redirect: 'error',
-					}),
+					});
+					if (!res.ok) return { kind: 'http', status: res.status };
+					try {
+						return { kind: 'ok', body: await res.json() };
+					} catch (error) {
+						return { kind: 'json-error', error };
+					}
+				},
 				SEARCH_TIMEOUT_MS,
 				timeoutError,
 			);
@@ -419,18 +433,18 @@ export class SpecStreamProvider implements WebSearchProvider {
 			);
 		}
 
-		if (!response.ok) {
+		if (outcome.kind === 'http') {
 			throw new WebSearchError(
-				`SpecStream HTTP ${response.status} for query "${query}"`,
+				`SpecStream HTTP ${outcome.status} for query "${query}"`,
 			);
 		}
-
-		let body: unknown;
-		try {
-			body = await response.json();
-		} catch (err) {
-			throw new WebSearchError('SpecStream returned non-JSON response', err);
+		if (outcome.kind === 'json-error') {
+			throw new WebSearchError(
+				'SpecStream returned non-JSON response',
+				outcome.error,
+			);
 		}
+		const body = outcome.body;
 
 		const sources = (body as SpecStreamResponse | null)?.data?.sources;
 		if (!Array.isArray(sources)) {

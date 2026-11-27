@@ -99,6 +99,33 @@ describe('web-search provider fetch timeout (#2476 AC6)', () => {
 		}
 	}, 9_000);
 
+	test('SpecStreamProvider bounds a body that stalls after headers', async () => {
+		const stallServer = http.createServer((_req, res) => {
+			// Send status and headers plus the start of a body, then never finish.
+			res.writeHead(200, { 'content-type': 'application/json' });
+			res.write('{"data":{"sources":[');
+		});
+		await new Promise<void>((resolve) =>
+			stallServer.listen(0, '127.0.0.1', resolve),
+		);
+		const stallPort = (stallServer.address() as { port: number }).port;
+		const priorFetch = globalThis.fetch;
+		globalThis.fetch = ((_url: string | URL | Request, init?: RequestInit) =>
+			realFetch(`http://127.0.0.1:${stallPort}/stall`, init)) as typeof fetch;
+		try {
+			const provider = new SpecStreamProvider('test-key');
+			const startedAt = performance.now();
+			await expect(provider.search('query', 1)).rejects.toThrow(
+				/SpecStream search timed out after 6000ms/,
+			);
+			expect(performance.now() - startedAt).toBeLessThan(8_000);
+		} finally {
+			globalThis.fetch = priorFetch;
+			stallServer.closeAllConnections();
+			await new Promise<void>((resolve) => stallServer.close(() => resolve()));
+		}
+	}, 9_000);
+
 	test('a fast successful response still parses normally', async () => {
 		// Restore real fetch routed to a server that answers instantly, to
 		// prove the signal does not abort healthy requests.

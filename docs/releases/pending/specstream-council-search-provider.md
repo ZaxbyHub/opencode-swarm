@@ -8,4 +8,4 @@
 - Results map the reply's `data.sources` to the shared title, URL and snippet shape; sources without a snippet are dropped, as for the other providers.
 - Freshness is not mapped for SpecStream, so it is not reported as applied.
 
-No migration is needed.
+No migration is needed. A config that selects `specstream` is rejected by plugin versions that predate it, so switch `searchProvider` back to a supported value before downgrading.
