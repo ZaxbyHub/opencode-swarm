@@ -36,8 +36,8 @@ import {
 	_internals as residueInternals,
 	rollbackResidueQuarantine,
 } from '../../../src/services/swarm-residue.js';
-import { canonicalMkdtemp } from '../../helpers/tmpdir';
 import { withFrozenClockAsync } from '../../helpers/test-clock.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 /** Deterministic instant every clock read in this file is relative to. */
 const FIXED_NOW = 1_800_000_000_000;
@@ -98,48 +98,55 @@ function injectManifestWriteFailure(): () => void {
 }
 
 describe('quarantineSwarmResidue manifest-after-move — regression: manifest persistence failure strands moved payloads and wedges default rollback (#3951 AC5)', () => {
-	test('every moved file is back at its original path or recoverable through normal rollback', () =>
-		withFrozenClockAsync(async () => {
-		const tmp = makeGitProject('ac5-strand-');
-		try {
-			const tempPath = seedStaleResidue(tmp, 'plan.json', '0'.repeat(32));
-			const restore = injectManifestWriteFailure();
-			let quarantineError: unknown;
-			try {
-				await quarantineSwarmResidue(tmp, { trigger: 'close' });
-			} catch (err) {
-				quarantineError = err;
-			} finally {
-				restore();
-			}
+	test(
+		'every moved file is back at its original path or recoverable through normal rollback',
+		() =>
+			withFrozenClockAsync(
+				async () => {
+					const tmp = makeGitProject('ac5-strand-');
+					try {
+						const tempPath = seedStaleResidue(tmp, 'plan.json', '0'.repeat(32));
+						const restore = injectManifestWriteFailure();
+						let quarantineError: unknown;
+						try {
+							await quarantineSwarmResidue(tmp, { trigger: 'close' });
+						} catch (err) {
+							quarantineError = err;
+						} finally {
+							restore();
+						}
 
-			// Reachability: the injection really forced the manifest-write
-			// failure out of quarantineSwarmResidue (the un-compensated throw).
-			expect(quarantineError).toBeInstanceOf(Error);
-			expect(String((quarantineError as Error).message)).toContain(
-				'manifest.json',
-			);
+						// Reachability: the injection really forced the manifest-write
+						// failure out of quarantineSwarmResidue (the un-compensated throw).
+						expect(quarantineError).toBeInstanceOf(Error);
+						expect(String((quarantineError as Error).message)).toContain(
+							'manifest.json',
+						);
 
-			// AC5 clause 1: after the failed publish, the moved payload is
-			// either back at its original path, or a normal (default) rollback
-			// recovers it.
-			let recovered = fs.existsSync(tempPath);
-			if (!recovered) {
-				try {
-					await rollbackResidueQuarantine(tmp);
-					recovered = fs.existsSync(tempPath);
-				} catch {
-					// rollback itself is wedged — recorded by the assertion below
-				}
-			}
-			expect(
-				recovered,
-				`payload stranded: ${tempPath} absent from its original path and not recoverable via rollback (quarantine error: ${String((quarantineError as Error).message)})`,
-			).toBe(true);
-		} finally {
-			fs.rmSync(tmp, { recursive: true, force: true });
-		}
-		}, { fixedNow: FIXED_NOW }), 30_000);
+						// AC5 clause 1: after the failed publish, the moved payload is
+						// either back at its original path, or a normal (default) rollback
+						// recovers it.
+						let recovered = fs.existsSync(tempPath);
+						if (!recovered) {
+							try {
+								await rollbackResidueQuarantine(tmp);
+								recovered = fs.existsSync(tempPath);
+							} catch {
+								// rollback itself is wedged — recorded by the assertion below
+							}
+						}
+						expect(
+							recovered,
+							`payload stranded: ${tempPath} absent from its original path and not recoverable via rollback (quarantine error: ${String((quarantineError as Error).message)})`,
+						).toBe(true);
+					} finally {
+						fs.rmSync(tmp, { recursive: true, force: true });
+					}
+				},
+				{ fixedNow: FIXED_NOW },
+			),
+		30_000,
+	);
 
 	test('the failed newest batch does not block default rollback of an older valid batch', async () => {
 		const tmp = makeGitProject('ac5-wedge-');
@@ -151,77 +158,79 @@ describe('quarantineSwarmResidue manifest-after-move — regression: manifest pe
 			// 1. An OLDER batch quarantined successfully (real manifest).
 			let olderTemp = '';
 			let olderBatchDir = '';
-			await withFrozenClockAsync(async () => {
-			olderTemp = seedStaleResidue(tmp, 'state.json', '1'.repeat(32));
-			const first = await quarantineSwarmResidue(tmp, { trigger: 'close' });
-			expect(first.quarantined).toBe(1);
-			expect(first.batchRelDir).toBeDefined();
-			olderBatchDir = path.join(
-				tmp,
-				'.swarm',
-				first.batchRelDir as string,
+			await withFrozenClockAsync(
+				async () => {
+					olderTemp = seedStaleResidue(tmp, 'state.json', '1'.repeat(32));
+					const first = await quarantineSwarmResidue(tmp, { trigger: 'close' });
+					expect(first.quarantined).toBe(1);
+					expect(first.batchRelDir).toBeDefined();
+					olderBatchDir = path.join(tmp, '.swarm', first.batchRelDir as string);
+					expect(fs.existsSync(path.join(olderBatchDir, 'manifest.json'))).toBe(
+						true,
+					);
+					expect(fs.existsSync(olderTemp)).toBe(false); // moved into the batch
+				},
+				{ fixedNow: FIXED_NOW },
 			);
-			expect(fs.existsSync(path.join(olderBatchDir, 'manifest.json'))).toBe(
-				true,
-			);
-			expect(fs.existsSync(olderTemp)).toBe(false); // moved into the batch
-			}, { fixedNow: FIXED_NOW });
 
 			// 2. A NEWER batch wedged by the manifest-write failure.
-			await withFrozenClockAsync(async () => {
-			const newerTemp = seedStaleResidue(tmp, 'plan.json', '0'.repeat(32));
-			const restore = injectManifestWriteFailure();
-			let secondError: unknown;
-			try {
-				await quarantineSwarmResidue(tmp, { trigger: 'close' });
-			} catch (err) {
-				secondError = err;
-			} finally {
-				restore();
-			}
-			// Reachability under the FIXED contract (#3951 AC5): the failure
-			// fired (quarantine threw) AND the newer payload is no longer
-			// stranded — it is back at its original path (compensation) or
-			// retained in a batch carrying a readable manifest surface. At
-			// base BOTH recovery routes are absent (payload stranded in a
-			// manifest-less batch), which is what made this check RED there.
-			expect(secondError).toBeInstanceOf(Error);
-			const newerBackAtOriginal = fs.existsSync(newerTemp);
-			const quarantineRoot = path.join(tmp, '.swarm', 'quarantine');
-			const batches = fs.existsSync(quarantineRoot)
-				? fs.readdirSync(quarantineRoot)
-				: [];
-			const newerBatchHasRecovery = batches.some((b) => {
-				if (b === path.basename(olderBatchDir)) return false;
-				const dir = path.join(quarantineRoot, b);
-				return (
-					fs.existsSync(path.join(dir, 'manifest.json')) ||
-					fs.existsSync(path.join(dir, 'manifest.recovery.json')) ||
-					fs.existsSync(path.join(quarantineRoot, `${b}.recovery.json`))
-				);
-			});
-			expect(
-				newerBackAtOriginal || newerBatchHasRecovery,
-				'newer payload stranded with no readable manifest surface',
-			).toBe(true);
+			await withFrozenClockAsync(
+				async () => {
+					const newerTemp = seedStaleResidue(tmp, 'plan.json', '0'.repeat(32));
+					const restore = injectManifestWriteFailure();
+					let secondError: unknown;
+					try {
+						await quarantineSwarmResidue(tmp, { trigger: 'close' });
+					} catch (err) {
+						secondError = err;
+					} finally {
+						restore();
+					}
+					// Reachability under the FIXED contract (#3951 AC5): the failure
+					// fired (quarantine threw) AND the newer payload is no longer
+					// stranded — it is back at its original path (compensation) or
+					// retained in a batch carrying a readable manifest surface. At
+					// base BOTH recovery routes are absent (payload stranded in a
+					// manifest-less batch), which is what made this check RED there.
+					expect(secondError).toBeInstanceOf(Error);
+					const newerBackAtOriginal = fs.existsSync(newerTemp);
+					const quarantineRoot = path.join(tmp, '.swarm', 'quarantine');
+					const batches = fs.existsSync(quarantineRoot)
+						? fs.readdirSync(quarantineRoot)
+						: [];
+					const newerBatchHasRecovery = batches.some((b) => {
+						if (b === path.basename(olderBatchDir)) return false;
+						const dir = path.join(quarantineRoot, b);
+						return (
+							fs.existsSync(path.join(dir, 'manifest.json')) ||
+							fs.existsSync(path.join(dir, 'manifest.recovery.json')) ||
+							fs.existsSync(path.join(quarantineRoot, `${b}.recovery.json`))
+						);
+					});
+					expect(
+						newerBackAtOriginal || newerBatchHasRecovery,
+						'newer payload stranded with no readable manifest surface',
+					).toBe(true);
 
-			// 3. AC5 clause 2: DEFAULT rollback (no batchId) must still restore
-			//    the older valid batch instead of throwing on the wedged one.
-			let rollbackError = '';
-			try {
-				await rollbackResidueQuarantine(tmp);
-			} catch (err) {
-				rollbackError = err instanceof Error ? err.message : String(err);
-			}
-			expect(
-				rollbackError,
-				'default rollback was blocked by the wedged newest batch',
-			).toBe('');
-			expect(
-				fs.existsSync(olderTemp),
-				`older valid batch payload not restored to ${olderTemp}`,
-			).toBe(true);
-			}, { fixedNow: FIXED_NOW + 60_000 });
+					// 3. AC5 clause 2: DEFAULT rollback (no batchId) must still restore
+					//    the older valid batch instead of throwing on the wedged one.
+					let rollbackError = '';
+					try {
+						await rollbackResidueQuarantine(tmp);
+					} catch (err) {
+						rollbackError = err instanceof Error ? err.message : String(err);
+					}
+					expect(
+						rollbackError,
+						'default rollback was blocked by the wedged newest batch',
+					).toBe('');
+					expect(
+						fs.existsSync(olderTemp),
+						`older valid batch payload not restored to ${olderTemp}`,
+					).toBe(true);
+				},
+				{ fixedNow: FIXED_NOW + 60_000 },
+			);
 		} finally {
 			fs.rmSync(tmp, { recursive: true, force: true });
 		}
