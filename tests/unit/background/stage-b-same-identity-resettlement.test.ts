@@ -23,8 +23,8 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import type { ReviewRouteEvidence } from '../../../src/review/routing-enforcement';
 import {
-	resetSwarmState,
 	reserveStageBRouteEvidence,
+	resetSwarmState,
 	startAgentSession,
 	swarmState,
 } from '../../../src/state';
@@ -91,15 +91,11 @@ describe('reserveStageBRouteEvidence same-identity replacement (accumulation wed
 
 		// Distinct identities stay distinct entries (the multi-slot receipt
 		// shape: two reviewer identities must coexist).
-		reserveStageBRouteEvidence(
-			session,
-			'2.20',
-			{
-				...binding('2.20', 'reviewer', 'call-r3', 'child-r3', 2),
-				identity: '2.20:reviewer:2',
-				slotId: '2.20:reviewer:2',
-			},
-		);
+		reserveStageBRouteEvidence(session, '2.20', {
+			...binding('2.20', 'reviewer', 'call-r3', 'child-r3', 2),
+			identity: '2.20:reviewer:2',
+			slotId: '2.20:reviewer:2',
+		});
 		const after = session.stageBRouteEvidence?.get('2.20') ?? [];
 		expect(after).toHaveLength(2);
 

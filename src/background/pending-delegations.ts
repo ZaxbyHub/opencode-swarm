@@ -3532,6 +3532,37 @@ export function readDelegationsDetailed(
 }
 
 /**
+ * Decision-scoped delegation read (#2703-review F-005). The ordinary
+ * {@link readDelegationsDetailed} is LENIENT towards schema-drifted
+ * coordination rows (bounded skips, surfaced via `skippedCoordinationRows`
+ * for status/advisory views), but a decision caller that checks only
+ * `status === 'uncertain'` reads a partially-skipped store as a complete
+ * truth — and in mixed-version/downgrade use the drifted rows are the
+ * NEWEST ones, so the decision can bind an older record (a sounding-board
+ * `evidenceTaskId`, a review-routing file list) as current. Every decision
+ * consumer therefore reads through this wrapper: a non-empty skip set is
+ * uncertainty, never a complete-looking older view. Status/advisory surfaces
+ * (status service, health artifact, `readDelegations` maintenance
+ * convenience) keep the lenient read and surface the skips.
+ */
+export function readDelegationsDetailedForDecisions(
+	directory: string,
+): DelegationReadOutcome {
+	const read = readDelegationsDetailed(directory);
+	const skippedCount =
+		read.status === 'ok' ? (read.skippedCoordinationRows?.length ?? 0) : 0;
+	if (read.status === 'ok' && skippedCount > 0) {
+		return {
+			status: 'uncertain',
+			reason: `delegation coordination rows skipped schema validation (${skippedCount} drifted row(s)); decision paths fail closed until the drift is repaired`,
+			source: 'coordination-read',
+			attempts: 1,
+		};
+	}
+	return read;
+}
+
+/**
  * Read and fold the store to the latest snapshot per correlationId. Lock-free and
  * defensive: a missing file yields an empty list, and malformed/partial lines are
  * skipped (never throws). Records are returned in first-seen correlationId order.
@@ -3638,7 +3669,7 @@ export function findByCorrelationIdDetailed(
 	correlationId: string,
 ): DelegationLookupOutcome<BackgroundDelegationRecord | null> {
 	if (!correlationId) return { status: 'ok', value: null };
-	const read = readDelegationsDetailed(directory);
+	const read = readDelegationsDetailedForDecisions(directory);
 	if (read.status === 'uncertain') return read;
 	for (const record of read.records) {
 		if (record.correlationId === correlationId) {
@@ -7082,7 +7113,7 @@ export function findByBatchIdDetailed(
 	opts?: { parentSessionId?: string },
 ): DelegationLookupOutcome<BackgroundDelegationRecord[]> {
 	if (!batchId) return { status: 'ok', value: [] };
-	const read = readDelegationsDetailed(directory);
+	const read = readDelegationsDetailedForDecisions(directory);
 	if (read.status === 'uncertain') return read;
 	return {
 		status: 'ok',
@@ -7714,7 +7745,7 @@ export function findLatestCoderTaskForParentSession(
 	parentSessionId: string,
 ): { status: 'ok'; taskId: string | null } | { status: 'uncertain' } {
 	if (!parentSessionId) return { status: 'ok', taskId: null };
-	const read = readDelegationsDetailed(directory);
+	const read = readDelegationsDetailedForDecisions(directory);
 	if (read.status === 'uncertain') return { status: 'uncertain' };
 	let best: { taskId: string; updatedAt: number } | null = null;
 	for (const record of read.records) {
@@ -7763,7 +7794,7 @@ export function findLatestSettledCoderFilesForTask(
 	taskId: string,
 ): { status: 'ok'; files: string[] } | { status: 'uncertain' } {
 	if (!taskId) return { status: 'ok', files: [] };
-	const read = readDelegationsDetailed(directory);
+	const read = readDelegationsDetailedForDecisions(directory);
 	if (read.status === 'uncertain') return { status: 'uncertain' };
 	let latest: { files: string[]; updatedAt: number } | null = null;
 	for (const record of read.records) {
@@ -7825,7 +7856,7 @@ export function findLatestSettledBackgroundCoderSettlement(
 	  }
 	| { status: 'uncertain' } {
 	if (!taskId) return { status: 'ok', settlement: null };
-	const read = readDelegationsDetailed(directory);
+	const read = readDelegationsDetailedForDecisions(directory);
 	if (read.status === 'uncertain') return { status: 'uncertain' };
 	let latest: {
 		correlationId: string;

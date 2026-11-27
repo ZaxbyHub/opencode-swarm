@@ -21,10 +21,7 @@ import {
 	readTaskEvidence,
 	transitionTaskWorkflowEvidence,
 } from '../../../src/gate-evidence';
-import {
-	ensureAgentSession,
-	resetSwarmState,
-} from '../../../src/state';
+import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import { _internals as settlementInternals } from '../../../src/workflow/coder-settlement';
 import { writeApprovedPlan } from '../../helpers/approved-plan';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';

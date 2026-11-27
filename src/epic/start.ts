@@ -40,7 +40,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
 	isTerminalDelegationStatus,
-	readDelegationsDetailed,
+	readDelegationsDetailedForDecisions,
 } from '../background/pending-delegations.js';
 import { loadPluginConfigWithMeta } from '../config/index.js';
 import type { Plan } from '../config/plan-schema.js';
@@ -293,7 +293,7 @@ export async function findInFlightCoderWork(
 			);
 		}
 	} else {
-		const outcome = _internals.readDelegationsDetailed(directory);
+		const outcome = _internals.readDelegationsDetailedForDecisions(directory);
 		if (outcome.status !== 'ok') {
 			found.push(
 				'background delegation state is uncertain — cannot prove no coder is running',
@@ -1014,7 +1014,7 @@ export const _internals = {
 	/** In-memory worktree dispatches (lazy: the maps live in an import cycle). */
 	countTrackedWorktreeDispatches: (): number =>
 		standardWorktreeByCallID.size + awaitingMergeByCallID.size,
-	readDelegationsDetailed,
+	readDelegationsDetailedForDecisions,
 	listCoderSettlementWalStates,
 	listRecoveryRecords,
 	recoveryReadErrored,

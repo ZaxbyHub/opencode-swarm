@@ -30,7 +30,7 @@ import {
 	DEFAULT_STALE_DELEGATION_TIMEOUT_MS,
 	findByBatchIdDetailed,
 	publishPrReviewResultReceipt,
-	readDelegationsDetailed,
+	readDelegationsDetailedForDecisions,
 	type SweepableDelegationStatus,
 	sweepStaleDelegations,
 } from '../background/pending-delegations.js';
@@ -2687,7 +2687,7 @@ export async function recordPrReviewSubmitRejection(
 	try {
 		const child = childSessionId.trim();
 		if (!child) return;
-		const childRead = readDelegationsDetailed(directory);
+		const childRead = readDelegationsDetailedForDecisions(directory);
 		if (childRead.status === 'uncertain') return;
 		const record = childRead.records.find(
 			(candidate) =>
@@ -2933,7 +2933,7 @@ async function submitPrReviewResultCore(
 	}
 	// Issue #2511: an unreadable store is distinct from "no such delegation" —
 	// reject with a typed reason instead of a misleading "found 0".
-	const childRead = readDelegationsDetailed(directory);
+	const childRead = readDelegationsDetailedForDecisions(directory);
 	if (childRead.status === 'uncertain') {
 		return {
 			status: 'rejected',
@@ -4397,7 +4397,7 @@ export async function settlePresumedStalePrWorkflowLanes(
 	// Issue #2511: an unreadable store is UNKNOWN lane state, never a clean
 	// zero-lane all-clear. Every openLanes-gated consumer must fail closed on
 	// the carried `uncertainty` instead of reading openLanes === 0 as settled.
-	const laneRead = readDelegationsDetailed(directory);
+	const laneRead = readDelegationsDetailedForDecisions(directory);
 	if (laneRead.status === 'uncertain') {
 		return {
 			openLaneIds: [],
@@ -4927,7 +4927,7 @@ async function finalizeOverriddenProbeRetainedLanes(
 	};
 	// Issue #2511: an unreadable store must not render as a zero-open-lane
 	// all-clear in the recovery disclosure — the ids lists are then UNKNOWN.
-	const finalizeRead = readDelegationsDetailed(directory);
+	const finalizeRead = readDelegationsDetailedForDecisions(directory);
 	if (finalizeRead.status === 'uncertain') {
 		return {
 			...outcome,
@@ -5983,7 +5983,7 @@ export async function rebindPrFeedbackHead(
 		}
 		// Issue #2511: an unreadable store must fail closed — the rebind guard
 		// cannot verify in-flight lanes, so rebind is refused until it is readable.
-		const rebindRead = readDelegationsDetailed(directory);
+		const rebindRead = readDelegationsDetailedForDecisions(directory);
 		if (rebindRead.status === 'uncertain') {
 			throw new Error(
 				`BLOCKED: PR_FEEDBACK rebind refused while the delegation store is unreadable after ${rebindRead.attempts} attempts (${rebindRead.reason}); in-flight lanes are UNKNOWN. Restore the store before rebinding.`,

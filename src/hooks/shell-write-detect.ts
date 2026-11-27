@@ -9873,8 +9873,7 @@ export function detectPosixWrites(
 					// path, so the empty-directory-removal tag is stripped
 					// from every decomposed write below (conservative,
 					// fail-closed).
-					const skeletonCdContext =
-						PROCSUB_CD_CONTEXT.test(split.skeleton);
+					const skeletonCdContext = PROCSUB_CD_CONTEXT.test(split.skeleton);
 					const bodyCdContext = split.bodies.some((body) =>
 						PROCSUB_CD_CONTEXT.test(body),
 					);
