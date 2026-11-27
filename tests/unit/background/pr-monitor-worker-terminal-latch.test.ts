@@ -180,6 +180,46 @@ describe('PrMonitorWorker — terminal event latch (#3947)', () => {
 		expect(unsubscribe).toHaveBeenCalledTimes(2);
 	});
 
+	test('clears the latch on auto-unsubscribe of a closed PR', async () => {
+		snapshot.mockImplementation(async () => snapshotFor('CLOSED'));
+		const worker = createWorker({ auto_unsubscribe_on_close: true });
+		await worker.pollCycle();
+		await worker.pollCycle();
+		expect(count('pr.closed')).toBe(2);
+		expect(unsubscribe).toHaveBeenCalledTimes(2);
+	});
+
+	test('does not re-emit but retries cleanup when the poll times out during emission', async () => {
+		snapshot.mockImplementation(async () => snapshotFor('MERGED'));
+		// The first pr.merged publish outlives the poll deadline; every other
+		// publish (including CI events emitted earlier) is instant.
+		let firstMergedSettled: Promise<void> = Promise.resolve();
+		let delayed = false;
+		publish.mockImplementation((type: string) => {
+			if (type === 'pr.merged' && !delayed) {
+				delayed = true;
+				firstMergedSettled = new Promise<void>((resolve) =>
+					setTimeout(resolve, 400),
+				);
+				return firstMergedSettled;
+			}
+			return Promise.resolve();
+		});
+		const worker = createWorker({
+			auto_unsubscribe_on_merge: true,
+			poll_timeout_ms: 200,
+		});
+		await worker.pollCycle();
+		// Timed out during emission: cleanup was skipped this cycle.
+		expect(unsubscribe).toHaveBeenCalledTimes(0);
+		await firstMergedSettled;
+		expect(count('pr.merged')).toBe(1);
+		await worker.pollCycle();
+		// Next cycle retries cleanup without re-emitting the terminal event.
+		expect(count('pr.merged')).toBe(1);
+		expect(unsubscribe).toHaveBeenCalledTimes(1);
+	});
+
 	test('re-emits pr.closed after a reopen-then-close sequence', async () => {
 		snapshot
 			.mockImplementationOnce(async () => snapshotFor('CLOSED'))
