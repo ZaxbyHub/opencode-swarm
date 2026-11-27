@@ -241,7 +241,21 @@ describe('static-analysis: src/index.ts PR workflow response gate registration',
 	});
 
 	test('session events reach the automatic workflow-resume gate', () => {
-		expect(source).toMatch(/await\s+prWorkflowResponseGate\.event\(input\)/);
+		// The session-event registration moved off the raw inline
+		// `await prWorkflowResponseGate.event(input)` form onto the staged
+		// event-subscriber runner (async-lifecycle r13 F5 / r14 P1-7): the
+		// gate runs as an isolated stage AFTER the durable completion
+		// observer so a throwing gate can never starve it. The runtime
+		// behavior of that runner is pinned by
+		// tests/unit/index-event-fanout-isolation.test.ts; this assertion
+		// only pins the registration shape in src/index.ts.
+		expect(source).toMatch(
+			/run:\s*\(\)\s*=>\s*prWorkflowResponseGate\.event\(input\),/,
+		);
+		// The old raw form must not silently return alongside the staged one.
+		expect(source).not.toMatch(
+			/await\s+prWorkflowResponseGate\.event\(input\)/,
+		);
 	});
 });
 

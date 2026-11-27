@@ -239,12 +239,14 @@ describe('#3401 — hostile payload shapes cannot kill the pump', () => {
 		const { received, drained } = await pumpEnvelopes([
 			inputStarted(PARENT, call, 'subagent'),
 			hostile,
+			inputStarted(PARENT, 'call_g_after', 'execute'),
 			toolCalled(PARENT, 'call_g_after'),
 		]);
 		expect(drained).toBe(true);
-		expect(deliveredParts(received).length).toBe(0);
-		// The pump survived the hostile envelope and kept dispatching.
-		expect(flatToolCalledEvents(received).length).toBe(1);
+		expect(qualifyingParts(received).length).toBe(0);
+		// The pump survived the hostile envelope and kept dispatching: the later
+		// non-subagent call's tool-state part arrived (not a task part).
+		expect(deliveredParts(received).length).toBe(1);
 	});
 
 	test('a throwing metadata PROPERTY accessor is contained and the pump keeps dispatching', async () => {
@@ -264,11 +266,12 @@ describe('#3401 — hostile payload shapes cannot kill the pump', () => {
 		const { received, drained } = await pumpEnvelopes([
 			inputStarted(PARENT, call, 'subagent'),
 			hostile,
+			inputStarted(PARENT, 'call_g_after', 'execute'),
 			toolCalled(PARENT, 'call_g_after'),
 		]);
 		expect(drained).toBe(true);
-		expect(deliveredParts(received).length).toBe(0);
-		expect(flatToolCalledEvents(received).length).toBe(1);
+		expect(qualifyingParts(received).length).toBe(0);
+		expect(deliveredParts(received).length).toBe(1);
 	});
 
 	test('whitespace-only ids never synthesize (end-to-end fail-closed)', async () => {

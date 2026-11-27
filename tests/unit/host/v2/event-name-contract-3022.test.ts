@@ -29,7 +29,21 @@ const FROZEN_CASE_LABELS = [
 	'session.text.ended',
 	'session.tool.success',
 	'session.tool.failed',
+	// PR 3922 (native-async): verified subagent synthetic envelopes.
+	'session.inbox.enqueued',
+	'session.synthetic',
+	'session.execution.succeeded',
+	'session.execution.interrupted',
+	// PR 3922 usage bridge: step events carry per-step usage (session.step.failed
+	// too), released by the completion observer at the verified terminal.
+	'session.step.ended',
+	'session.step.failed',
 ] as const;
+
+// Payload discriminators read by a `type !== '…'` comparison that are NOT event
+// names: `synthetic` is the inbox item payload kind (events.ts item.type check),
+// so the pump-side scrape must not treat it as an envelope name.
+const PAYLOAD_DISCRIMINATORS = ['synthetic'] as const;
 
 describe('#3022 v2 event-name contract (mapV2EventToV1 case labels)', () => {
 	test('the mapper case-label set matches the frozen contract exactly', () => {
@@ -71,7 +85,9 @@ describe('#3022 v2 event-name contract (mapV2EventToV1 case labels)', () => {
 			),
 		];
 		const pumpOnly = pumpReads.filter(
-			(name) => !(FROZEN_CASE_LABELS as readonly string[]).includes(name),
+			(name) =>
+				!(FROZEN_CASE_LABELS as readonly string[]).includes(name) &&
+				!(PAYLOAD_DISCRIMINATORS as readonly string[]).includes(name),
 		);
 		expect([...pumpOnly].sort()).toEqual(
 			[...PUMP_SIDE_READ_EVENT_NAMES].sort(),

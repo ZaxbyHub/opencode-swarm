@@ -393,6 +393,18 @@ async function collectBackgroundWorkStatus(
 	} catch {
 		// observation only; the facts ring records the failure
 	}
+	// r15 audit repair (P3): recover context-map task-release promotions
+	// lost to a best-effort promotion failure at update_task_status.
+	// Idempotent, config-gated, fail-closed on QA proof; best-effort — a
+	// status command must never fail because of it.
+	try {
+		const { reconcileContextMapTaskReleases } = await import(
+			'../context-map/post-agent-update.js'
+		);
+		await reconcileContextMapTaskReleases(directory);
+	} catch {
+		// observation only; the next maintenance point retries
+	}
 	const counts = {
 		pending: 0,
 		running: 0,
