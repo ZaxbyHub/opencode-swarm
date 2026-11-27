@@ -461,7 +461,17 @@ async function resolveDurableGateTaskId(
 				declared !== null &&
 				declared !== undefined &&
 				declared.length > 0 &&
-				declared.some((f) => f !== '' && normalizedCallerFiles.includes(f));
+				// #2703 review LOW: same predicate as the eligible arm above —
+				// a declared DIRECTORY covers everything beneath it
+				// (scopeSetContainsFile), so a directory-scoped wedge gets the
+				// precise awaiting-Stage-A advisory instead of falling through
+				// to the generic one on exact-path-only matching.
+				(() => {
+					const declaredSet = new Set(declared.filter((f) => f !== ''));
+					return normalizedCallerFiles.some((f) =>
+						scopeSetContainsFile(declaredSet, f),
+					);
+				})();
 			if (bound) {
 				return {
 					awaitingStageA: candidate.taskId,

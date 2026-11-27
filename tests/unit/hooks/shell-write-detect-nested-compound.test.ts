@@ -194,7 +194,8 @@ describe('detectPosixWrites — nested compound decomposition', () => {
 					command:
 						'for i in 1; do if true; then echo x > hosts; cd /etc; fi; done',
 					writePath: 'hosts',
-					label: 'write before the cd inside the same body (iteration 2 lands post-cd)',
+					label:
+						'write before the cd inside the same body (iteration 2 lands post-cd)',
 				},
 				{
 					command:

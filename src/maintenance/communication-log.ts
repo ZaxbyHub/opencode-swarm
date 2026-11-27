@@ -35,9 +35,14 @@
 import * as fsSync from 'node:fs';
 import * as path from 'node:path';
 import { appendCoreEventSync } from '../events/core-events';
+import {
+	EvidenceLockTimeoutError,
+	withEvidenceLock,
+} from '../evidence/lock';
 import { getTaskWorkflowSnapshot, readTaskEvidence } from '../gate-evidence';
 import { validateSwarmPath } from '../hooks/utils';
 import { warn } from '../utils';
+import { atomicWriteSwarmFileSync } from '../utils/atomic-write';
 import { isStrictTaskId } from '../validation/task-id';
 
 /** Bounded read: the log is curated prose, never a dump. */
@@ -98,19 +103,33 @@ export interface PruneCommunicationLogResult {
 export const _internals = {
 	readFileSync: (file: string) => fsSync.readFileSync(file, 'utf8'),
 	writeFileSync: (file: string, content: string) =>
-		fsSync.writeFileSync(file, content),
+		atomicWriteSwarmFileSync(file, content),
 	statSync: (file: string) => fsSync.statSync(file),
 	appendCoreEventSync,
 	readTaskEvidence,
 };
 
-const STATUS_RE = /^-\s*Status:\s*(.+)$/im;
+// Bold-tolerant (`- **Status:**`, `- Status:`) status-line matcher (#2703
+// review LOW: the plain form missed the bold markdown spelling real entries
+// use, leaving such incidents without a status classification).
+const STATUS_RE = /^-\s*\*{0,2}\s*Status:?\s*\*{0,2}\s*(.+)$/im;
 const TASK_ID_RE = /^-\s*Task-ID:\s*(.+)$/im;
 const INCIDENT_PREFIX = 'vorfall ';
 
 function classifyStatus(statusText: string): 'closed' | 'open' | 'unclear' {
-	if (/\bGESCHLOSSEN\b|\bclosed\b/i.test(statusText)) return 'closed';
+	// The verdict word usually LEADS the status value ("OFFEN — …",
+	// "GESCHLOSSEN — …"): a leading keyword wins over any later mention
+	// ("GESCHLOSSEN — früher offen" stays closed). A status with no leading
+	// keyword falls back to OPEN-first scanning ("OFFEN — not closed yet"
+	// must stay open — the closed-first order put live incidents on the
+	// auto-prune candidate list, #2703 review LOW); anything unmatchable is
+	// unclear. Fail-safe direction throughout: ambiguous entries survive.
+	const leading = /^\s*(?:offen|open|geschlossen|closed)\b/i.exec(statusText);
+	if (leading) {
+		return /(?:offen|open)/i.test(leading[0]) ? 'open' : 'closed';
+	}
 	if (/\bOFFEN\b|\bopen\b/i.test(statusText)) return 'open';
+	if (/\bGESCHLOSSEN\b|\bclosed\b/i.test(statusText)) return 'closed';
 	return 'unclear';
 }
 
@@ -270,71 +289,96 @@ export async function pruneCommunicationLog(
 		if (memoUnchanged(directory, file)) {
 			return empty;
 		}
-		let raw: string;
-		try {
-			raw = _internals.readFileSync(file);
-		} catch {
-			return empty; // no log — nothing to maintain
-		}
-		if (Buffer.byteLength(raw, 'utf8') > MAX_LOG_BYTES) return empty;
-		const { incidents } = parseCommunicationLog(raw);
-		const prunable: CommunicationLogIncident[] = [];
-		const unclearClosed: UnclearClosedEntry[] = [];
-		let openCount = 0;
-		for (const incident of incidents) {
-			if (incident.status === 'open') {
-				openCount++;
-				continue;
-			}
-			if (incident.status === 'closed') {
-				if (incident.taskIds.length === 0) {
-					unclearClosed.push({
-						headline: incident.headline,
-						taskIds: [],
-						why: 'no_task_id',
-					});
-					continue;
+		// Serialize read→splice→write against the AI-release path and other
+		// maintenance passes: the plain read-await-write window could overwrite
+		// a concurrent release (both splice from different raw snapshots, the
+		// later writer drops the earlier's removal — #2703 review LOW). The
+		// lock fail-opens on contention: the next pass retries the same
+		// idempotent prune.
+		return await withEvidenceLock(
+			directory,
+			file,
+			'communication-log',
+			'prune-pass',
+			async () => {
+				let raw: string;
+				try {
+					raw = _internals.readFileSync(file);
+				} catch {
+					return empty; // no log — nothing to maintain
 				}
-				if (await allTasksDurablyComplete(directory, incident.taskIds)) {
-					prunable.push(incident);
-				} else {
+				if (Buffer.byteLength(raw, 'utf8') > MAX_LOG_BYTES) return empty;
+				const { incidents } = parseCommunicationLog(raw);
+				const prunable: CommunicationLogIncident[] = [];
+				const unclearClosed: UnclearClosedEntry[] = [];
+				let openCount = 0;
+				for (const incident of incidents) {
+					if (incident.status === 'open') {
+						openCount++;
+						continue;
+					}
+					if (incident.status === 'closed') {
+						if (incident.taskIds.length === 0) {
+							unclearClosed.push({
+								headline: incident.headline,
+								taskIds: [],
+								why: 'no_task_id',
+							});
+							continue;
+						}
+						if (await allTasksDurablyComplete(directory, incident.taskIds)) {
+							prunable.push(incident);
+						} else {
+							unclearClosed.push({
+								headline: incident.headline,
+								taskIds: incident.taskIds,
+								why: 'task_not_durably_complete',
+							});
+						}
+						continue;
+					}
+					// No (or unrecognized) Status line: an unclear entry is never
+					// auto-pruned — it is AI-release worklist material.
 					unclearClosed.push({
 						headline: incident.headline,
 						taskIds: incident.taskIds,
-						why: 'task_not_durably_complete',
+						why: 'no_status_line',
 					});
 				}
-				continue;
-			}
-			// No (or unrecognized) Status line: an unclear entry is never
-			// auto-pruned — it is AI-release worklist material.
-			unclearClosed.push({
-				headline: incident.headline,
-				taskIds: incident.taskIds,
-				why: 'no_status_line',
-			});
-		}
-		if (prunable.length === 0) {
-			return { pruned: [], unclearClosed, openCount, unchanged: true };
-		}
-		_internals.writeFileSync(file, spliceOutAll(raw, prunable));
-		// The prune itself bumps the file's mtime — refresh the memo from the
-		// post-write state so the next pass skips instead of re-parsing once.
-		memoUnchanged(directory, file);
-		for (const incident of prunable) {
-			emitPruneEvent(directory, incident, 'closed_durably_complete');
-		}
-		return {
-			pruned: prunable.map((incident) => ({
-				headline: incident.headline,
-				taskIds: incident.taskIds,
-				cause: 'closed_durably_complete' as const,
-			})),
-			unclearClosed,
-			openCount,
-			unchanged: false,
-		};
+				if (prunable.length === 0) {
+					return {
+						pruned: [],
+						unclearClosed,
+						openCount,
+						unchanged: true,
+					};
+				}
+				_internals.writeFileSync(file, spliceOutAll(raw, prunable));
+				// The prune itself bumps the file's mtime — refresh the memo from
+				// the post-write state so the next pass skips instead of
+				// re-parsing once.
+				memoUnchanged(directory, file);
+				for (const incident of prunable) {
+					emitPruneEvent(directory, incident, 'closed_durably_complete');
+				}
+				return {
+					pruned: prunable.map((incident) => ({
+						headline: incident.headline,
+						taskIds: incident.taskIds,
+						cause: 'closed_durably_complete' as const,
+					})),
+					unclearClosed,
+					openCount,
+					unchanged: false,
+				};
+			},
+			5_000,
+		);
 	} catch (error) {
+		if (error instanceof EvidenceLockTimeoutError) {
+			warn('communication-log prune pass skipped: log lock contended', {});
+			return empty;
+		}
 		warn('communication-log prune pass failed (fail-open)', {
 			error:
 				error instanceof Error ? error.message.slice(0, 120) : String(error),
@@ -364,36 +408,61 @@ export async function releaseCommunicationLogEntry(options: {
 	const { directory, headlinePrefix, reason, actorSessionID } = options;
 	try {
 		const file = validateSwarmPath(directory, 'swarm_communication_debug.md');
-		const raw = _internals.readFileSync(file);
-		const { incidents } = parseCommunicationLog(raw);
-		const prefix = headlinePrefix.trim().toLowerCase();
-		const matches = incidents.filter((incident) =>
-			incident.headline.toLowerCase().startsWith(prefix),
+		// Serialize against the maintenance prune pass (the same
+		// read-await-write lost-update window) and keep the read bounded like
+		// every other consumer of this log (#2703 review LOW): an over-cap log
+		// refuses the release instead of parsing unbounded bytes.
+		return await withEvidenceLock(
+			directory,
+			file,
+			'communication-log',
+			'ai-release',
+			async () => {
+				let raw: string;
+				try {
+					raw = _internals.readFileSync(file);
+				} catch {
+					return { outcome: 'not_found', candidates: [] } as const;
+				}
+				if (Buffer.byteLength(raw, 'utf8') > MAX_LOG_BYTES) {
+					return { outcome: 'not_found', candidates: [] } as const;
+				}
+				const { incidents } = parseCommunicationLog(raw);
+				const prefix = headlinePrefix.trim().toLowerCase();
+				const matches = incidents.filter((incident) =>
+					incident.headline.toLowerCase().startsWith(prefix),
+				);
+				if (matches.length === 0) {
+					return {
+						outcome: 'not_found',
+						candidates: incidents.map((i) => i.headline),
+					} as const;
+				}
+				if (matches.length > 1) {
+					return {
+						outcome: 'ambiguous',
+						candidates: matches.map((i) => i.headline),
+					} as const;
+				}
+				const target = matches[0];
+				if (target.status === 'open') {
+					return { outcome: 'refused_open', headline: target.headline } as const;
+				}
+				_internals.writeFileSync(file, spliceOutAll(raw, [target]));
+				emitPruneEvent(directory, target, 'ai_released', reason, actorSessionID);
+				return {
+					outcome: 'released',
+					headline: target.headline,
+					taskIds: target.taskIds,
+				} as const;
+			},
+			5_000,
 		);
-		if (matches.length === 0) {
-			return {
-				outcome: 'not_found',
-				candidates: incidents.map((i) => i.headline),
-			};
-		}
-		if (matches.length > 1) {
-			return {
-				outcome: 'ambiguous',
-				candidates: matches.map((i) => i.headline),
-			};
-		}
-		const target = matches[0];
-		if (target.status === 'open') {
-			return { outcome: 'refused_open', headline: target.headline };
-		}
-		_internals.writeFileSync(file, spliceOutAll(raw, [target]));
-		emitPruneEvent(directory, target, 'ai_released', reason, actorSessionID);
-		return {
-			outcome: 'released',
-			headline: target.headline,
-			taskIds: target.taskIds,
-		};
 	} catch (error) {
+		if (error instanceof EvidenceLockTimeoutError) {
+			warn('communication-log AI release skipped: log lock contended', {});
+			return { outcome: 'not_found', candidates: [] };
+		}
 		warn('communication-log AI release failed (fail-open)', {
 			error:
 				error instanceof Error ? error.message.slice(0, 120) : String(error),
@@ -414,7 +483,15 @@ export async function reportCommunicationLogWorklist(
 	};
 	try {
 		const file = validateSwarmPath(directory, 'swarm_communication_debug.md');
-		const raw = _internals.readFileSync(file);
+		let raw: string;
+		try {
+			raw = _internals.readFileSync(file);
+		} catch {
+			return empty;
+		}
+		// Bounded like every other consumer (#2703 review LOW): the worklist
+		// never parses unbounded bytes.
+		if (Buffer.byteLength(raw, 'utf8') > MAX_LOG_BYTES) return empty;
 		const { incidents } = parseCommunicationLog(raw);
 		const unclearClosed: UnclearClosedEntry[] = [];
 		let openCount = 0;

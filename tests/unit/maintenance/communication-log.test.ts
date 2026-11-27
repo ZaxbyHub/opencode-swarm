@@ -132,6 +132,26 @@ describe('parseCommunicationLog', () => {
 		const { incidents } = parseCommunicationLog(raw);
 		expect(incidents[0].status).toBe('closed');
 	});
+
+	test('an open status mentioning "closed" stays open (leading verdict wins)', () => {
+		// #2703 review LOW: "OFFEN — not closed yet" carried both words and the
+		// closed-first scan classified it closed, putting a live incident on
+		// the auto-prune candidate list.
+		const raw =
+			LOG_HEADER + incidentBlock('x', '1.1', 'OFFEN — not closed yet');
+		const { incidents } = parseCommunicationLog(raw);
+		expect(incidents[0].status).toBe('open');
+	});
+
+	test('a bold - **Status:** line is recognized as the status line', () => {
+		// #2703 review LOW: the plain matcher missed the bold markdown spelling
+		// real entries use, leaving such incidents without status classification.
+		const raw =
+			LOG_HEADER +
+			'\n## Vorfall bold\n- Task-ID: 1.1\n- **Status:** GESCHLOSSEN\n- Symptom: x\n';
+		const { incidents } = parseCommunicationLog(raw);
+		expect(incidents[0].status).toBe('closed');
+	});
 });
 
 describe('pruneCommunicationLog (automatic pass)', () => {

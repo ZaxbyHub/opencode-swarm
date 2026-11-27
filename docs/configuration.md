@@ -1409,6 +1409,42 @@ valid/rejected receipts through the registered `tool.execute.before/after`
 hooks with guardrails enabled and disabled; expected result classes are
 bounded JSON tool outputs plus the durable states and route events above.
 
+### Communication debug log maintenance (`prune_communication_log`)
+
+A project that keeps a `.swarm/swarm_communication_debug.md` incident log
+(the swarm-communication debugging convention) gets two maintenance paths:
+
+- **Auto-prune** (session-close maintenance pass): a `## Vorfall` incident
+  whose `Status:` line says closed (leading verdict word wins —
+  `GESCHLOSSEN`/`closed`/`OFFEN`/`open`, bold markdown accepted) AND whose
+  every `Task-ID:` has workflow evidence at terminal `complete` is removed
+  automatically; every removal appends a `communication_log_pruned` core
+  event. The pass is bounded (1 MB), idempotent, mtime-memoed, lock-serialized,
+  and fail-open — a locked or failing pass leaves the file untouched for the
+  next run.
+- **AI release** (the `prune_communication_log` tool, architect-only,
+  audited): everything else — a closed entry whose task is not provably
+  complete (or that names no task), or an entry without a Status line — is
+  never auto-removed. The tool's no-argument mode reports the AI-release
+  worklist with per-entry reasons; with `entry_headline` + `reason` it
+  removes exactly ONE closed-or-unclear entry and audits the decision to
+  the core events log. Open incidents and the structural sections (header,
+  format, open-points lists) are never touched.
+
+### File zones and `blockedZones` (architect write authority)
+
+`classifyFile` (src/context/zone-classifier.ts) assigns every path one of
+`production`, `test`, `config`, `generated`, `docs`, `build`, `state`. The
+`state` zone is ONLY `.swarm/loop/**` — the architect's own loop-run state
+(the `AUTHORITY_POLICY_DENY` wedge fix). Gate-integrity surfaces under
+`.swarm/` keep their base classifications (`.json` → `config`, ledgers and
+logs → `production`), so the architect's default `blockedZones`
+(`generated`, `config` — the #894 lint-bypass class) keeps blocking evidence
+bundles, route receipts, `full-auto-state.json`, and `session/` state; a
+consumer that must lock the loop state down too can add `blockedZones:
+["state"]` to an agent rule (older plugin versions reject the value —
+7.205.12+ accepts it).
+
 ### Gate-denial escalation
 
 Every fail-closed `tool.execute.before` hook (guardrails authority, scope
