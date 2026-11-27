@@ -2,48 +2,6 @@
 	"$comment": "Issue #1534 anchor ratchet. Every entry is PRE-EXISTING citation debt in a row owned by another issue, captured so the #1534 gate could be landed without editing rows it does not own. An entry is NOT approved drift: it records a citation whose adjacent identifier does not occur in the cited line range. This baseline may only SHRINK — scripts/check-registry-citations.ts fails when an entry starts passing, which forces its removal. Keyed on (rowId, file, identifier); line numbers are deliberately excluded so line churn cannot invalidate an entry. Regenerate with `bun run scripts/check-registry-citations.ts --write` (review the diff — --write will also happily record NEW drift).",
 	"entries": [
 		{
-			"rowId": "architecture-summaries",
-			"file": "src/summaries/store.ts",
-			"identifier": "listAgentSummaries",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"listAgentSummaries\" exists in src/summaries/store.ts but not inside src/summaries/store.ts:103 (architecture-summaries.readerCitations[0])."
-		},
-		{
-			"rowId": "architecture-summaries",
-			"file": "src/summaries/store.ts",
-			"identifier": "readPhaseArchitectureSummary",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"readPhaseArchitectureSummary\" exists in src/summaries/store.ts but not inside src/summaries/store.ts:151 (architecture-summaries.readerCitations[1])."
-		},
-		{
-			"rowId": "architecture-summaries",
-			"file": "src/summaries/store.ts",
-			"identifier": "readSupervisorReportRaw",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"readSupervisorReportRaw\" exists in src/summaries/store.ts but not inside src/summaries/store.ts:226 (architecture-summaries.readerCitations[2])."
-		},
-		{
-			"rowId": "architecture-summaries",
-			"file": "src/summaries/store.ts",
-			"identifier": "writeAgentSummary",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"writeAgentSummary\" exists in src/summaries/store.ts but not inside src/summaries/store.ts:72 (architecture-summaries.writerCitations[0])."
-		},
-		{
-			"rowId": "architecture-summaries",
-			"file": "src/summaries/store.ts",
-			"identifier": "writePhaseArchitectureSummary",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"writePhaseArchitectureSummary\" exists in src/summaries/store.ts but not inside src/summaries/store.ts:141 (architecture-summaries.writerCitations[1])."
-		},
-		{
-			"rowId": "architecture-summaries",
-			"file": "src/summaries/store.ts",
-			"identifier": "writeSupervisorReport",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"writeSupervisorReport\" exists in src/summaries/store.ts but not inside src/summaries/store.ts:179 (architecture-summaries.writerCitations[2])."
-		},
-		{
 			"rowId": "attestations",
 			"file": "src/hooks/guardrails/file-authority.ts",
 			"identifier": "recordAttestation",
@@ -114,13 +72,6 @@
 			"note": "Pre-existing debt, not approved drift: \"writePhaseCouncilEvidence\" exists in src/tools/submit-phase-council-verdicts.ts but not inside src/tools/submit-phase-council-verdicts.ts:407 (council-evidence-files.writerCitations[0])."
 		},
 		{
-			"rowId": "council-evidence-files",
-			"file": "src/tools/write-final-council-evidence.ts",
-			"identifier": "executeWriteFinalCouncilEvidence",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"executeWriteFinalCouncilEvidence\" exists in src/tools/write-final-council-evidence.ts but not inside src/tools/write-final-council-evidence.ts:137 (council-evidence-files.writerCitations[1])."
-		},
-		{
 			"rowId": "council-round-state-attempts",
 			"file": "src/council/council-round-state.ts",
 			"identifier": "loadState",
@@ -161,41 +112,6 @@
 			"identifier": "persistReportJson",
 			"kind": "out-of-range",
 			"note": "Pre-existing debt, not approved drift: \"persistReportJson\" exists in src/commands/coupling.ts but not inside src/commands/coupling.ts:153 (epic-turbo-state.writerCitations[2])."
-		},
-		{
-			"rowId": "evidence-bundles",
-			"file": "src/evidence/manager.ts",
-			"identifier": "archiveEvidence",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"archiveEvidence\" exists in src/evidence/manager.ts but not inside src/evidence/manager.ts:701 (evidence-bundles.writerCitations[1])."
-		},
-		{
-			"rowId": "evidence-bundles",
-			"file": "src/evidence/manager.ts",
-			"identifier": "listEvidenceTaskIds",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"listEvidenceTaskIds\" exists in src/evidence/manager.ts but not inside :518 (evidence-bundles.readerCitations[0])."
-		},
-		{
-			"rowId": "evidence-bundles",
-			"file": "src/evidence/manager.ts",
-			"identifier": "loadEvidence",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"loadEvidence\" exists in src/evidence/manager.ts but not inside src/evidence/manager.ts:390 (evidence-bundles.readerCitations[0])."
-		},
-		{
-			"rowId": "evidence-bundles",
-			"file": "src/evidence/manager.ts",
-			"identifier": "saveEvidence",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"saveEvidence\" exists in src/evidence/manager.ts but not inside src/evidence/manager.ts:196 (evidence-bundles.writerCitations[0])."
-		},
-		{
-			"rowId": "evidence-bundles",
-			"file": "src/summaries/manager.ts",
-			"identifier": "storeSummary",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"storeSummary\" exists in src/summaries/manager.ts but not inside src/summaries/manager.ts:132 (evidence-bundles.writerCitations[2])."
 		},
 		{
 			"rowId": "knowledge-application-legacy",
@@ -259,69 +175,6 @@
 			"identifier": "validateAndCommitTerminalBatch",
 			"kind": "out-of-range",
 			"note": "Pre-existing debt, not approved drift: \"validateAndCommitTerminalBatch\" exists in src/hooks/knowledge-receipt-ledger.ts but not inside :2098 (knowledge-receipts-v2.writerCitations[1])."
-		},
-		{
-			"rowId": "knowledge-retractions",
-			"file": "src/hooks/knowledge-store.ts",
-			"identifier": "appendRetractionRecord",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"appendRetractionRecord\" exists in src/hooks/knowledge-store.ts but not inside src/hooks/knowledge-store.ts:328 (knowledge-retractions.writerCitations[0])."
-		},
-		{
-			"rowId": "knowledge-retractions",
-			"file": "src/hooks/knowledge-store.ts",
-			"identifier": "readRetractionRecords",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"readRetractionRecords\" exists in src/hooks/knowledge-store.ts but not inside src/hooks/knowledge-store.ts:314 (knowledge-retractions.readerCitations[0])."
-		},
-		{
-			"rowId": "knowledge-store",
-			"file": "src/hooks/knowledge-store.ts",
-			"identifier": "appendKnowledge",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"appendKnowledge\" exists in src/hooks/knowledge-store.ts but not inside src/hooks/knowledge-store.ts:561 (knowledge-store.writerCitations[0])."
-		},
-		{
-			"rowId": "knowledge-store",
-			"file": "src/hooks/knowledge-store.ts",
-			"identifier": "enforceKnowledgeCap",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"enforceKnowledgeCap\" exists in src/hooks/knowledge-store.ts but not inside src/hooks/knowledge-store.ts:880 (knowledge-store.writerCitations[1])."
-		},
-		{
-			"rowId": "knowledge-store",
-			"file": "src/hooks/knowledge-store.ts",
-			"identifier": "readKnowledge",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"readKnowledge\" exists in src/hooks/knowledge-store.ts but not inside src/hooks/knowledge-store.ts:139 (knowledge-store.readerCitations[0])."
-		},
-		{
-			"rowId": "knowledge-store",
-			"file": "src/hooks/knowledge-store.ts",
-			"identifier": "rewriteKnowledge",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"rewriteKnowledge\" exists in src/hooks/knowledge-store.ts but not inside :598 (knowledge-store.writerCitations[0])."
-		},
-		{
-			"rowId": "knowledge-store",
-			"file": "src/hooks/knowledge-store.ts",
-			"identifier": "sweepAgedEntries",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"sweepAgedEntries\" exists in src/hooks/knowledge-store.ts but not inside :962 (knowledge-store.writerCitations[1])."
-		},
-		{
-			"rowId": "knowledge-store",
-			"file": "src/hooks/knowledge-store.ts",
-			"identifier": "transactKnowledge",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"transactKnowledge\" exists in src/hooks/knowledge-store.ts but not inside :684 (knowledge-store.writerCitations[0])."
-		},
-		{
-			"rowId": "knowledge-store",
-			"file": "src/hooks/knowledge-store.ts",
-			"identifier": "transactKnowledgeWithCas",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"transactKnowledgeWithCas\" exists in src/hooks/knowledge-store.ts but not inside :726 (knowledge-store.writerCitations[0])."
 		},
 		{
 			"rowId": "memory-sqlite",
@@ -609,27 +462,6 @@
 			"identifier": "AutomationStatusArtifact",
 			"kind": "out-of-range",
 			"note": "Pre-existing debt, not approved drift: \"AutomationStatusArtifact\" exists in src/background/status-artifact.ts but not inside src/background/status-artifact.ts:178 (status-artifacts.writerCitations[0])."
-		},
-		{
-			"rowId": "summaries",
-			"file": "src/summaries/manager.ts",
-			"identifier": "listSummaries",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"listSummaries\" exists in src/summaries/manager.ts but not inside :340 (summaries.readerCitations[0])."
-		},
-		{
-			"rowId": "summaries",
-			"file": "src/summaries/manager.ts",
-			"identifier": "loadFullOutput",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"loadFullOutput\" exists in src/summaries/manager.ts but not inside src/summaries/manager.ts:201 (summaries.readerCitations[0])."
-		},
-		{
-			"rowId": "summaries",
-			"file": "src/summaries/manager.ts",
-			"identifier": "storeSummary",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"storeSummary\" exists in src/summaries/manager.ts but not inside src/summaries/manager.ts:100 (summaries.writerCitations[0])."
 		},
 		{
 			"rowId": "task-evidence-trajectory",
