@@ -4,10 +4,10 @@
  *
  * Thin wrapper around `src/council/web-search-provider.ts`. Returns structured
  * results on success and structured errors on failure (never throws). Config-
- * gated on `council.general.enabled`. Tavily and Brave require a key (a missing
+ * gated on `council.general.enabled`. Tavily, Brave and SpecStream require a key (a missing
  * key surfaces as WebSearchConfigError, mapped to a structured
  * `success: false` response); Keenable's key is optional (keyless public
- * endpoint). Providers that report `supportsFreshness === false` (Keenable)
+ * endpoint). Providers that report `supportsFreshness === false` (Keenable, SpecStream)
  * get no freshness filter and freshness is not reported as applied.
  *
  * Hard cap on max_results = 10 (clamped silently). Default sourced from council.general.maxSourcesPerMember.
@@ -71,8 +71,8 @@ export const web_search: ReturnType<typeof tool> = createSwarmTool({
 	description:
 		'External web search for architect-driven council research, SME domain research, and skill-improver research. Returns titled results with snippets and URLs. ' +
 		'Used by the architect in MODE: COUNCIL to gather a RESEARCH CONTEXT before dispatching council agents and by SME to evaluate external skill/source candidates. ' +
-		'Normalizes current-intent queries, strips trailing stale cutoff years, and applies provider freshness filters by default for providers that support them (Keenable has no freshness mapping, so freshness is not applied or reported for it). ' +
-		'Requires council.general.enabled and, for Tavily or Brave, a configured search API key (Keenable works keyless; its key is optional via KEENABLE_API_KEY) in the resolved config: global ~/.config/opencode/opencode-swarm.json, then project .opencode/opencode-swarm.json overrides. max_results is capped at 10 with default from council.general.maxSourcesPerMember.',
+		'Normalizes current-intent queries, strips trailing stale cutoff years, and applies provider freshness filters by default for providers that support them (Keenable and SpecStream have no freshness mapping, so freshness is not applied or reported for them). ' +
+		'Requires council.general.enabled and, for Tavily or Brave, a configured search API key, or for SpecStream, SPECSTREAM_API_KEY (Keenable works keyless; its key is optional via KEENABLE_API_KEY) in the resolved config: global ~/.config/opencode/opencode-swarm.json, then project .opencode/opencode-swarm.json overrides. max_results is capped at 10 with default from council.general.maxSourcesPerMember.',
 	args: {
 		query: z
 			.string()

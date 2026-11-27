@@ -16,6 +16,13 @@ describe('council.general.searchProvider keenable', () => {
 		}
 	});
 
+	it('accepts specstream as an optional provider', () => {
+		const specstream = GeneralCouncilConfigSchema.safeParse({
+			searchProvider: 'specstream',
+		});
+		expect(specstream.success).toBe(true);
+	});
+
 	it('still rejects an unknown provider', () => {
 		expect(
 			GeneralCouncilConfigSchema.safeParse({ searchProvider: 'duckduckgo' })
@@ -41,6 +48,6 @@ describe('council.general.searchProvider keenable', () => {
 		};
 		expect(
 			json.properties.council.properties.general.properties.searchProvider.enum,
-		).toEqual(['tavily', 'brave', 'keenable']);
+		).toEqual(['tavily', 'brave', 'keenable', 'specstream']);
 	});
 });

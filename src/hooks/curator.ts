@@ -42,6 +42,7 @@ import {
 import { observeCuratorCompliance } from '../health/learning-health';
 import { authorizeCuration } from '../knowledge/curation-policy.js';
 import { alreadyCuratedThisGeneration } from '../knowledge/scan-cursor.js';
+import { redactSecrets } from '../memory/redaction';
 import { loadPlanJsonOnly } from '../plan/manager.js';
 import {
 	computeLearningMetrics,
@@ -70,6 +71,7 @@ import {
 	reviseSkill,
 	type ViolationContext,
 } from '../services/skill-reviser.js';
+import { neutralizeResidueName } from '../services/swarm-residue';
 import { swarmState } from '../state.js';
 import { bunWrite } from '../utils/bun-compat';
 import { extractContextDecisions } from '../utils/context-decisions';
@@ -922,7 +924,9 @@ function readLatestPostMortemDigest(directory: string): string | null {
 			0,
 			1500,
 		);
-		return `${latest.name}\n${body}`;
+		// The readdir-sourced name is interpolated into the agent-facing
+		// briefing — neutralize the name segment (issue #3836 D3).
+		return `${neutralizeResidueName(latest.name)}\n${body}`;
 	} catch {
 		return null;
 	}
@@ -1006,12 +1010,41 @@ function parseCuratorSummaryContent(content: string): CuratorSummaryFileState {
 	}
 }
 
+/**
+ * R-9 (4.5 round 9): apply the persisted-store floor PER STRING VALUE —
+ * deep-walk the summary object, redactSecrets every string, leave
+ * numbers/booleans/keys untouched. JSON-safe by construction (each redacted
+ * string is re-escaped by JSON.stringify); idempotent on its own output.
+ */
+function floorSummaryValues(value: unknown): unknown {
+	if (typeof value === 'string') return redactSecrets(value);
+	if (Array.isArray(value)) return value.map(floorSummaryValues);
+	if (value !== null && typeof value === 'object') {
+		const out: Record<string, unknown> = {};
+		for (const [key, entry] of Object.entries(value)) {
+			out[key] = floorSummaryValues(entry);
+		}
+		return out;
+	}
+	return value;
+}
+
 async function writeCuratorSummaryState(
 	filePath: string,
 	state: CuratorSummaryFileState,
 ): Promise<void> {
 	if (!state.summary) return;
-	await bunWrite(filePath, JSON.stringify(state.summary, null, 2));
+	// #3893/#3915 owner-approved fix (option b): the persisted curator
+	// summary carries model-derived free text (phase digests, key decisions,
+	// blockers, observations, recommendations) — compose the persisted-store
+	// floor (redactSecrets) PER STRING VALUE before serialization (R-9: the
+	// floor over serialized JSON corrupted artifacts at string boundaries).
+	// The in-memory state keeps the raw summary so digests/CAS in this
+	// session are unaffected.
+	await bunWrite(
+		filePath,
+		JSON.stringify(floorSummaryValues(state.summary), null, 2),
+	);
 	// Only after a SUCCESSFUL write (`bunWrite` rejects on failure, so an
 	// unreachable statement here is the desired behaviour). `curator-summary.json`
 	// is read through the cached reader — `readCuratorSummaryState` below,

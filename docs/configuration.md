@@ -44,6 +44,7 @@ Most behavior is controlled by `opencode-swarm.json`. Environment variables are 
 | `TAVILY_API_KEY` | General Council web search | Tavily credential used when `council.general.searchApiKey` is unset and `searchProvider` is `tavily`. |
 | `BRAVE_SEARCH_API_KEY` | General Council web search | Brave Search credential used when `council.general.searchApiKey` is unset and `searchProvider` is `brave`. |
 | `KEENABLE_API_KEY` | General Council web search | Optional Keenable credential, the only source of the Keenable key (`council.general.searchApiKey` is never forwarded to Keenable). Blank or whitespace-only values count as unset. Without it, requests use Keenable's keyless public endpoint. See the Privacy note under `council.general`. |
+| `SPECSTREAM_API_KEY` | General Council web search | Required when `council.general.searchProvider` is `specstream`, and the only source of the SpecStream key (`council.general.searchApiKey` is never forwarded to SpecStream). Blank or whitespace-only values count as unset; without it the provider reports a missing key and sends nothing. |
 | `OPENCODE_SWARM_DEBUG=1` | Debug logger | Enables debug-gated log output. Keep disabled for normal use. |
 | `OPENCODE_SWARM_VERSION_BANNER=1` | Startup version banner | Restores the raw stderr `[opencode-swarm] running vX.Y.Z` startup line (default off; the banner otherwise appears only under `OPENCODE_SWARM_DEBUG=1`, in the debug logger's stdout output). Use for headless/CLI stale-cache diagnosis — identifying which cached plugin version actually loaded (issue #2236). The raw stderr leg is off by default because the TUI renders plugin stderr as an overlay (issue #3405). |
 | `DEBUG_SWARM=1` | Startup and hook diagnostics | Enables additional startup, hook, and plan-manager diagnostics. Keep disabled unless debugging plugin behavior. |
@@ -2002,12 +2003,14 @@ Triggered by `/swarm council <question>` (see [Commands](commands.md#swarm-counc
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | boolean | `false` | Master switch for the General Council feature |
-| `searchProvider` | `'tavily' \| 'brave' \| 'keenable'` | `'tavily'` | Web search backend used by the architect's pre-search pass |
-| `searchApiKey` | string? | undefined | API key for `tavily` or `brave`. Falls back to `TAVILY_API_KEY` / `BRAVE_SEARCH_API_KEY` when unset. Not used for `keenable`: a shared key is intentionally not forwarded to another vendor; the Keenable key comes only from `KEENABLE_API_KEY`, and Keenable works with no key. |
+| `searchProvider` | `'tavily' \| 'brave' \| 'keenable' \| 'specstream'` | `'tavily'` | Web search backend used by the architect's pre-search pass |
+| `searchApiKey` | string? | undefined | API key for `tavily` or `brave`. Falls back to `TAVILY_API_KEY` / `BRAVE_SEARCH_API_KEY` when unset. Not used for `keenable`: a shared key is intentionally not forwarded to another vendor; the Keenable key comes only from `KEENABLE_API_KEY`, and Keenable works with no key. Not used for `specstream` either: its key comes only from `SPECSTREAM_API_KEY`. |
 | `deliberate` | boolean | `true` | When `true`, the architect routes Round 1 disagreements back to disputing agents for a single Round 2 reconciliation |
 | `maxSourcesPerMember` | number | `5` | Hard cap on results per `web_search` call (1–20) |
 
 **Privacy note (Keenable).** Without `KEENABLE_API_KEY`, requests go to the keyless endpoint `https://api.keenable.ai/v1/search/public`. Per Keenable's documentation ([rate limits](https://docs.keenable.ai/rate-limits)), Keenable logs the query and the client IP on that endpoint, and keyless use is limited to 1,000 requests per hour and 10 per second per IP. Freshness is not mapped for Keenable (the provider sends no time-range filter), so `freshness` is not reported as applied in `web_search` output.
+
+**Data sent (SpecStream).** Each search is one `GET https://api.specstream.ai/v1/web-search?q=<query>&num=<max results>` with `Authorization: Bearer <SPECSTREAM_API_KEY>`; redirects are refused, so the key never leaves api.specstream.ai. Results are the reply's `data.sources` (title, URL, snippet). A search of up to 10 results costs $0.005 of SpecStream credit and a search with no results costs nothing. Freshness is not mapped for SpecStream, so `freshness` is not reported as applied.
 
 **Deprecated fields** (retained on the strict schema for backward compatibility; ignored at runtime):
 
@@ -2075,6 +2078,7 @@ auto-activate skills.
 | `knowledge.realtime_learning_nudge.repeat_after_tool_calls` | number | `25` | Minimum additional tool calls before the same session can be nudged again. |
 | `knowledge.receipt_close_grace_days` | integer | `7` | Retains resolved V2 receipt membership for this many days after durable phase closure before archival/compaction eligibility. Accepts `0`-`3650`; live or unresolved membership is never age-evicted. |
 | `knowledge.promotion_require_actionable` | boolean | `true` | Enforces the actionability floor on **every** hive-promotion path — automatic promotion, `/swarm promote <text>`, and `/swarm promote --from-swarm <id>`. A lesson is promotable only if it carries at least one predicate (`required_actions`, `forbidden_actions`, `verification_checks`) **and** at least one scope (`applies_to_tools`, `applies_to_agents`). See [the promote command](./commands.md#swarm-promote---category-cat---from-swarm-id-actionability-flags-text) for the flags that supply them. |
+| `knowledge.promotion_min_terminal_applications` | number | `1` | Minimum independent validated terminal-application receipts required for promotion (issue #3820). Default 1 activates the application-evidence gate on every hive-promotion route; set `0` to opt out of this gate (which weakens provenance enforcement). Legacy records receive no synthetic credit. |
 
 ### Instruction cache key and invalidation inputs (issue #2672)
 
@@ -2450,8 +2454,8 @@ When `curation_enabled: true`, the architect agent gains access to 7 tools:
 **"Promote fails with 'content hash mismatch'"**
 → The candidate was modified after discovery (TOCTOU detection). Re-discover the candidate to get a fresh evaluation.
 
-**"Revoke fails with 'cannot extract skill slug from history'"**
-→ The candidate's promotion history may be corrupted or missing. The revoke tool needs the slug from the original promotion record to locate the SKILL.md file. If the history was tampered with, delete the candidate and manually remove the SKILL.md file.
+**"Revoke cannot determine the legacy skill slug"**
+→ Inspect the candidate's promotion history and generated-skill path; structured records use their recorded target. Do not delete a mismatched artifact without reviewing it.
 
 ## Turbo Configuration
 

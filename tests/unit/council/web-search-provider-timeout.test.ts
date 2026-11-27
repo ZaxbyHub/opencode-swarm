@@ -3,6 +3,7 @@ import http from 'node:http';
 import {
 	BraveProvider,
 	KeenableProvider,
+	SpecStreamProvider,
 	TavilyProvider,
 	WebSearchError,
 } from '../../../src/council/web-search-provider';
@@ -74,6 +75,54 @@ describe('web-search provider fetch timeout (#2476 AC6)', () => {
 			expect(signals[0].aborted).toBe(true);
 		} finally {
 			globalThis.fetch = hangingFetch;
+		}
+	}, 9_000);
+
+	test('SpecStreamProvider rejects within 8s and aborts the fetch signal', async () => {
+		const signals: AbortSignal[] = [];
+		const hangingFetch = globalThis.fetch;
+		globalThis.fetch = ((url: string | URL | Request, init?: RequestInit) => {
+			if (init?.signal) signals.push(init.signal);
+			return hangingFetch(url, init);
+		}) as typeof fetch;
+		try {
+			const provider = new SpecStreamProvider('test-key');
+			const startedAt = performance.now();
+			await expect(provider.search('query', 1)).rejects.toThrow(
+				/SpecStream search timed out after 6000ms/,
+			);
+			expect(performance.now() - startedAt).toBeLessThan(8_000);
+			expect(signals).toHaveLength(1);
+			expect(signals[0].aborted).toBe(true);
+		} finally {
+			globalThis.fetch = hangingFetch;
+		}
+	}, 9_000);
+
+	test('SpecStreamProvider bounds a body that stalls after headers', async () => {
+		const stallServer = http.createServer((_req, res) => {
+			// Send status and headers plus the start of a body, then never finish.
+			res.writeHead(200, { 'content-type': 'application/json' });
+			res.write('{"data":{"sources":[');
+		});
+		await new Promise<void>((resolve) =>
+			stallServer.listen(0, '127.0.0.1', resolve),
+		);
+		const stallPort = (stallServer.address() as { port: number }).port;
+		const priorFetch = globalThis.fetch;
+		globalThis.fetch = ((_url: string | URL | Request, init?: RequestInit) =>
+			realFetch(`http://127.0.0.1:${stallPort}/stall`, init)) as typeof fetch;
+		try {
+			const provider = new SpecStreamProvider('test-key');
+			const startedAt = performance.now();
+			await expect(provider.search('query', 1)).rejects.toThrow(
+				/SpecStream search timed out after 6000ms/,
+			);
+			expect(performance.now() - startedAt).toBeLessThan(8_000);
+		} finally {
+			globalThis.fetch = priorFetch;
+			stallServer.closeAllConnections();
+			await new Promise<void>((resolve) => stallServer.close(() => resolve()));
 		}
 	}, 9_000);
 

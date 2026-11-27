@@ -358,6 +358,10 @@ read only from the environment. Per Keenable's documentation
 which logs the query and IP, and are limited to 1,000 requests/hour and
 10/second per IP.
 
+`"searchProvider": "specstream"` needs `SPECSTREAM_API_KEY`, read only from the
+environment (an inline `searchApiKey` is not sent to SpecStream). Each search is
+one `GET` to api.specstream.ai with the key as a Bearer token.
+
 > 🛈 **Deprecated fields.** Older configs may carry `members`, `presets`,
 > `moderator`, and `moderatorModel` under `council.general`. These are
 > retained on the strict schema for backward compatibility but are ignored
@@ -426,8 +430,8 @@ dispatch:
   generated query such as `latest multi-agent debate research 2025` is searched
   as `latest multi-agent debate research` when the current year is later;
 - Tavily receives `time_range` for inferred freshness, and Brave receives its
-  equivalent `freshness` parameter; freshness is not mapped for Keenable (the
-  provider sends no time-range filter), so it is not reported as applied;
+  equivalent `freshness` parameter; freshness is not mapped for Keenable or
+  SpecStream (neither sends a time-range filter), so it is not reported as applied;
 - the tool response includes `originalQuery`, normalized `query`,
   `temporalIntent`, `freshness`, and `removedStaleYears` so the architect can
   include that audit metadata in the RESEARCH CONTEXT.
@@ -477,7 +481,7 @@ Council's evidence path so the two systems never collide.
 
 ### Limitations
 
-- Requires a search API key for Tavily or Brave (Keenable needs none). Without a
+- Requires a search API key for Tavily, Brave or SpecStream (Keenable needs none). Without a
   required key, members fail with a structured "missing_api_key" error.
 - Each council agent needs runtime access to its underlying model
   (reviewer / critic / SME) — the council does not validate model

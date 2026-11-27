@@ -19,6 +19,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { sanitizeContextText } from '../hooks/context-sanitizer';
+import { derivePlanIdentityHash } from '../plan/utils';
 import type {
 	ContextMap,
 	DecisionEntry,
@@ -26,12 +27,14 @@ import type {
 	TaskContextSummary,
 } from '../types/context-map';
 import { extractContextDecisions } from '../utils/context-decisions';
+import * as logger from '../utils/logger.js';
 import { extractFileSummary } from './file-summary';
 import {
 	appendDecision,
 	appendTaskHistory,
 	createEmptyContextMap,
 	loadContextMap,
+	readContextMapState,
 	saveContextMap,
 } from './persistence';
 
@@ -102,7 +105,24 @@ export interface PostAgentUpdateParams {
 	/** Task goal description */
 	task_goal: string;
 	/** Final status of the task */
-	final_status: 'completed' | 'failed' | 'blocked' | 'cancelled';
+	/**
+	 * The release status of the WHOLE TASK, not the individual child:
+	 *
+	 * - `'completed'` — ONLY when the authoritative task release is proven
+	 *   (plan task status completed AND every required QA gate satisfied).
+	 *   Maps to the final `'approved'` context-map status.
+	 * - `'in_progress'` — r14 audit repair (P1-5): a single successful child
+	 *   or gate ingestion is NOT a full task release. Maps to the non-final
+	 *   `'pending'` context-map status; the authoritative promotion happens
+	 *   later (update_task_status / promoteContextMapTaskRelease).
+	 * - `'failed' | 'blocked' | 'cancelled'` — terminal negative outcomes.
+	 */
+	final_status:
+		| 'completed'
+		| 'in_progress'
+		| 'failed'
+		| 'blocked'
+		| 'cancelled';
 	/** Reviewer rejection reasons (if any) */
 	rejection_reasons?: string[];
 	/** Review findings (if any) */
@@ -264,6 +284,10 @@ function deriveFinalStatus(
 	switch (params.final_status) {
 		case 'completed':
 			return 'approved';
+		// r14 audit repair (P1-5): a child/gate-level success while the task
+		// is not yet authoritatively released — the NON-FINAL status.
+		case 'in_progress':
+			return 'pending';
 		case 'failed':
 			return 'rejected';
 		case 'blocked':
@@ -330,6 +354,7 @@ export const _internals = {
 	loadContextMap,
 	saveContextMap,
 	createEmptyContextMap,
+	readContextMapState,
 	extractFileSummary,
 	existsSync: fs.existsSync,
 	readFileSync: fs.readFileSync,
@@ -581,11 +606,34 @@ export function updateContextMapAfterAgent(
 	params: PostAgentUpdateParams,
 ): ContextMap {
 	try {
-		// 1. Load existing map or create empty
-		let map = _internals.loadContextMap(params.directory);
-		if (map === null) {
-			map = _internals.createEmptyContextMap();
+		// 1. Load existing map or create empty — but ONLY rebuild for a
+		// GENUINELY missing map (r17 audit repair, P1). An existing-but-corrupt
+		// or unreadable map must be preserved byte-for-byte: the previous
+		// `loadContextMap(...) ?? createEmptyContextMap()` collapsed "missing"
+		// and "corrupt" into the same null, so a child completion on a damaged
+		// file manufactured a fresh, nearly-empty map and — via
+		// `saveContextMap` — REPLACED the damaged file, destroying the
+		// operator's recovery path (the same hole the r16 repairs closed for
+		// `promoteContextMapTaskRelease` and the reconciliation; this is the
+		// remaining normal child-update path). The whole update is SKIPPED:
+		// no in-memory rebuild, no save, no fake task history. The skipped
+		// write is never acked as persisted — the completion observer's
+		// read-back verifier (`verifyContextMapWrite`) fails on an unreadable
+		// map, so the closeout obligation stays resumable until the map is
+		// repaired. Return contract unchanged (never throws; a detached empty
+		// map is returned without persisting it, mirroring the outer-catch
+		// fallback).
+		const readState = _internals.readContextMapState(params.directory);
+		if (readState.kind === 'unreadable') {
+			logger.warn(
+				`[context-map] ${params.directory}/.swarm/context-map.json exists but is corrupt or unreadable — preserving the original file; child completion update for task ${params.task_id} skipped (repair the map; the closeout stays resumable)`,
+			);
+			return _internals.createEmptyContextMap();
 		}
+		let map =
+			readState.kind === 'ok'
+				? readState.map
+				: _internals.createEmptyContextMap();
 
 		// 2. Refresh file summaries for touched files
 		const root = path.resolve(params.directory);
@@ -671,7 +719,19 @@ export function updateContextMapAfterAgent(
 					: deriveFinalStatus(params),
 		};
 
-		map = _internals.appendTaskHistory(map, taskSummary);
+		// r14 audit repair (P1-5): a NON-FINAL child-level update must never
+		// overwrite a terminal task verdict in the context map — a later
+		// positive reviewer completion (status 'pending') cannot erase an
+		// already-recorded negative test-engineer verdict ('rejected'), an
+		// authoritative release ('approved'), or a blocked task.
+		const existingSummary = map.task_history[params.task_id];
+		const wouldOverwriteTerminal =
+			existingSummary !== undefined &&
+			existingSummary.final_status !== 'pending' &&
+			taskSummary.final_status === 'pending';
+		if (!wouldOverwriteTerminal) {
+			map = _internals.appendTaskHistory(map, taskSummary);
+		}
 
 		// 4. Append decisions (idempotent: exact-text duplicates are skipped so
 		// re-syncing `.swarm/context.md` on every task completion does not
@@ -738,5 +798,672 @@ export function updateContextMapAfterAgent(
 		} catch {
 			return _internals.createEmptyContextMap();
 		}
+	}
+}
+
+/**
+ * r16 audit repair (P2): the COORDINATED post-agent update. Wraps the whole
+ * load→update→save cycle of {@link updateContextMapAfterAgent} in the
+ * cross-process context-map write lock, so two concurrent completions (the
+ * background observer in one process, the sync Task handoff hook in another)
+ * cannot both extend a map they loaded before either saved — the loser's
+ * task summary, decisions, and file summaries would silently vanish.
+ * Best-effort by the same contract as the sync variant.
+ */
+export async function updateContextMapAfterAgentLocked(
+	params: PostAgentUpdateParams,
+	lockTimeoutMs: number = CONTEXT_MAP_LOCK_BUDGET_MS.background,
+): Promise<ContextMap> {
+	const result = await withContextMapLock(
+		params.directory,
+		params.agent_role || 'unknown',
+		params.task_id,
+		() => updateContextMapAfterAgent(params),
+		lockTimeoutMs,
+	);
+	return result.ok
+		? result.value
+		: (_internals.loadContextMap(params.directory) ??
+				_internals.createEmptyContextMap());
+}
+
+// ---------------------------------------------------------------------------
+// Task-release verification and authoritative promotion (r14 audit P1-5)
+// ---------------------------------------------------------------------------
+
+/**
+ * r17 (§6): lazily-bound raw plan readers used by the per-task release proof
+ * when NO snapshot is supplied. Seamed so the I/O-budget regression can
+ * count (or replace) the physical plan.json reads without mocking `node:fs`
+ * (mock.module on node:fs wedges Bun 1.4.4's module machinery — measured,
+ * see reconcile-io-budget.test.ts). Production binds the real gate-evidence
+ * functions on first use; each invocation is one physical plan.json read.
+ */
+export const _planProofReaders: {
+	resolveCurrentPlanIdentitySync:
+		| null
+		| ((
+				directory: string,
+		  ) => { planId: string; planIdentityHash: string } | null);
+	readCurrentTaskDeclaredFiles:
+		| null
+		| ((directory: string, taskId: string) => string[] | null);
+} = {
+	resolveCurrentPlanIdentitySync: null,
+	readCurrentTaskDeclaredFiles: null,
+};
+
+/** Lazily bind the raw plan readers from gate-evidence (once per process). */
+async function bindPlanProofReaders(): Promise<void> {
+	if (
+		_planProofReaders.resolveCurrentPlanIdentitySync !== null &&
+		_planProofReaders.readCurrentTaskDeclaredFiles !== null
+	) {
+		return;
+	}
+	const gate = await import('../gate-evidence.js');
+	_planProofReaders.resolveCurrentPlanIdentitySync ??=
+		gate.resolveCurrentPlanIdentitySync;
+	_planProofReaders.readCurrentTaskDeclaredFiles ??=
+		gate.readCurrentTaskDeclaredFiles;
+}
+
+/**
+ * r17 (§6): a once-loaded, READ-ONLY plan snapshot the reconciliation pass
+ * derives from the plan it already loaded — so the per-task evidence proof
+ * does not re-read and re-parse the ENTIRE plan.json twice per candidate
+ * (`resolveCurrentPlanIdentitySync` + `readCurrentTaskDeclaredFiles` both
+ * raw-read plan.json; measured pre-repair: ~4000 physical plan opens for a
+ * 1000-task first pass).
+ *
+ * SECURITY CONTRACT: the snapshot is only used for repeatable, read-only
+ * proof computation. It never replaces an authority check at a mandatory
+ * write point — the promotion fence
+ * (`promoteContextMapTaskReleaseLocked`) re-reads the CURRENT plan under
+ * the context-map lock and re-verifies BOTH the task status AND the plan
+ * identity hash before writing, so a plan that changed identity mid-pass
+ * fails closed and the next maintenance pass re-drives the promotions.
+ *
+ * Residual (documented): `planIdentityHash` derives from `swarm` + `title`
+ * only — a same-identity plan.json edit limited to a completed task's
+ * `files_touched` between the pass's plan load and the promotion is not
+ * detected by the identity fence. The status fence plus the fail-closed
+ * evidence gates bound that window; no exactly-once guarantee is claimed.
+ */
+export interface TaskReleaseProofSnapshot {
+	/** Identity hash of the plan the snapshot was derived from (never undefined). */
+	planIdentityHash: string | null;
+	/**
+	 * The task's declared files, with `readCurrentTaskDeclaredFiles`
+	 * semantics: null when the task is absent, duplicated, or its
+	 * files_touched is not a string[].
+	 */
+	declaredFiles: string[] | null;
+}
+
+/** Derive the declared-files map from an already-loaded plan (once per pass). */
+function deriveDeclaredFilesByTask(
+	plan: import('../config/plan-schema').Plan,
+): Map<string, string[] | null> {
+	const byTask = new Map<string, string[] | null>();
+	for (const phase of plan.phases) {
+		for (const task of phase.tasks) {
+			if (byTask.has(task.id)) {
+				// Duplicate task id: not proof (readCurrentTaskDeclaredFiles
+				// returns null for a second match).
+				byTask.set(task.id, null);
+				continue;
+			}
+			const files = (task as { files_touched?: unknown }).files_touched;
+			byTask.set(
+				task.id,
+				Array.isArray(files) && files.every((file) => typeof file === 'string')
+					? [...(files as string[])]
+					: null,
+			);
+		}
+	}
+	return byTask;
+}
+
+/**
+ * r16 audit repair (P2): the evidence-lock key coordinating every
+ * context-map read-modify-write cycle. `saveContextMap`'s atomic write makes
+ * each individual persist torn-write-safe, but two processes that both
+ * LOADED the map before either saved still lose one writer's update (last
+ * rename wins). The mutation entry points below wrap their whole
+ * load→mutate→save cycle in the EXISTING cross-process evidence lock
+ * (`withEvidenceLock`, the same coordinating layer the pr-subscription and
+ * evidence stores use) so participating writers serialize. The lock is
+ * coordinating, not a sandbox: unlocked legacy writers can still clobber —
+ * they could before r16 too.
+ */
+const CONTEXT_MAP_LOCK_KEY = 'context-map.json';
+
+/**
+ * r17 audit repair (P1): bounded lock-ACQUISITION budgets for the
+ * context-map paths, replacing the inherited 60 000 ms evidence-lock
+ * default. `withEvidenceLock`'s timeout bounds only the ACQUISITION wait —
+ * on timeout the callback never started, so there is no uncontrolled
+ * continuation and no partial write (this is precisely why the budget is
+ * passed through `withEvidenceLock`'s `timeoutMs` instead of a
+ * `Promise.race` around the write, which would leave the operation running
+ * after the racer returned).
+ *
+ * The context-map write is OPTIONAL enrichment: a skipped write is
+ * fail-closed and recovered — the completion observer's `context_map`
+ * closeout step stays un-acked (retryable) and the maintenance-point
+ * reconciliation re-drives the promotion. A tool completion (and the whole
+ * hook chain behind it) must never wait minutes on it.
+ */
+export const CONTEXT_MAP_LOCK_BUDGET_MS = {
+	/**
+	 * The critical synchronous `tool.execute.after` path: an optional
+	 * context-map write must not delay a delegation's completion signal.
+	 */
+	hook: 1_500,
+	/**
+	 * Background closeout steps and the authoritative promotion from
+	 * update_task_status: bounded (journaled retries recover a skip; the
+	 * task release itself never rolls back).
+	 */
+	background: 5_000,
+	/**
+	 * Maintenance reconciliation (status service, post-init maintenance,
+	 * observer maintenance pass): still bounded — an unattended pass must
+	 * not sit on the lock for a minute.
+	 */
+	maintenance: 10_000,
+} as const;
+
+/**
+ * Run `fn` under the cross-process context-map write lock. Never throws:
+ * a lock failure (timeout, project-root rejection) is logged and reported
+ * via the return value so best-effort callers can skip — the reconciliation
+ * at the next maintenance point recovers a skipped promotion.
+ *
+ * `timeoutMs` bounds only the lock ACQUISITION (r17): on timeout `fn` never
+ * ran, so the mutation is skipped whole — no partial write is possible.
+ */
+export async function withContextMapLock<T>(
+	directory: string,
+	agent: string,
+	taskId: string,
+	fn: () => T | Promise<T>,
+	timeoutMs: number = 60_000,
+): Promise<{ ok: true; value: T } | { ok: false }> {
+	try {
+		const { withEvidenceLock } = await import('../evidence/lock.js');
+		const value = await withEvidenceLock(
+			directory,
+			CONTEXT_MAP_LOCK_KEY,
+			agent,
+			taskId,
+			async () => fn(),
+			timeoutMs,
+		);
+		return { ok: true, value };
+	} catch (error) {
+		logger.warn(
+			`[context-map] write lock for task ${taskId} failed (skipped; retried at the next maintenance point): ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		);
+		return { ok: false };
+	}
+}
+
+/**
+ * Whether the WHOLE TASK is authoritatively released: the plan's task status
+ * is `completed` AND every required QA gate has a recorded (satisfied) result.
+ * A single successful child or gate ingestion proves nothing about the task
+ * release — that is exactly the conflation this repair removes.
+ *
+ * Fail-closed: any read error or missing proof yields `'in_progress'`.
+ *
+ * r16 audit repair (P1): the release proof now applies the same durable
+ * authority rules as the real task completion (`update_task_status` /
+ * `checkReviewerGate`) instead of a raw `required_gates.every(...)` scan:
+ *
+ * - `readTaskEvidenceState` (not `readTaskEvidence`): a missing OR
+ *   unparseable/corrupt evidence file both fail closed. The previous code
+ *   coerced `null` into an EMPTY required-gate list, and `[].every(...)`
+ *   passed vacuously — a plan that merely claimed `completed` released the
+ *   context map with no QA evidence at all.
+ * - `deriveApplicableGateSet`: the single authoritative gate derivation.
+ *   Empty `required_gates` are only legitimate with the exact generation-0
+ *   no-mutation settlement proof (or a matched external-evidence attest);
+ *   otherwise Stage A (`pre_check`) remains applicable and is reported
+ *   missing. Do NOT require `required_gates.length > 0` literally — the
+ *   settlement/attest cases are the repository's legitimate empty-gate
+ *   authorizations.
+ * - the workflow metadata must be authoritative and terminal
+ *   (`tests_run`/`complete`) or a legitimate read-only no-mutation
+ *   settlement. A `forcedCompletion` marker is durable proof that the task
+ *   did NOT pass the gates and never releases the map.
+ * - evidence stamped (planIdentityHash) for a different plan is prior
+ *   campaign evidence and fails closed; an absent stamp is "unknown" and
+ *   keeps the pre-existing non-blocking behavior (same semantics as
+ *   `evidenceStampedForDifferentPlan`).
+ *
+ * r16 audit repair (P2, 7.2): the durable-evidence half is split into
+ * {@link resolveTaskReleaseEvidenceProof} so the reconciliation pass — which
+ * already holds the loaded plan and iterates only completed tasks — can
+ * verify N tasks with ONE plan load instead of N+1 (each extra
+ * `loadPlanJsonOnly` is a stat plus a structuredClone of the ENTIRE plan;
+ * measured at 100/500/1000 pending completed tasks: 100/500/1000 redundant
+ * plan loads and ~2.9 s for the 1000-task first pass). The combined
+ * `resolveContextMapTaskReleaseStatus` keeps its exact contract for the
+ * observer and sync-handoff callers.
+ */
+export async function resolveTaskReleaseEvidenceProof(
+	directory: string,
+	taskId: string,
+	snapshot?: TaskReleaseProofSnapshot,
+): Promise<boolean> {
+	try {
+		await bindPlanProofReaders();
+		const {
+			readTaskEvidenceState,
+			getTaskWorkflowSnapshot,
+			deriveApplicableGateSet,
+			evidenceStampedForDifferentPlan,
+		} = await import('../gate-evidence.js');
+		// Fail closed on missing AND unparseable evidence — a vacuous
+		// empty-gate pass is never a release proof.
+		const state = await readTaskEvidenceState(directory, taskId);
+		if (state.kind !== 'ok') {
+			return false;
+		}
+		const evidence = state.evidence;
+		// Prior-campaign evidence (positive plan-identity mismatch only).
+		// r17 (§6): with a pass snapshot the identity comes from the snapshot
+		// (zero per-task plan reads); the write-point promotion fence
+		// re-verifies the CURRENT plan identity before any write.
+		const currentIdentityHash =
+			snapshot?.planIdentityHash ??
+			_planProofReaders.resolveCurrentPlanIdentitySync!(directory)
+				?.planIdentityHash ??
+			null;
+		if (evidenceStampedForDifferentPlan(evidence, currentIdentityHash)) {
+			return false;
+		}
+		const workflow = getTaskWorkflowSnapshot(evidence);
+		// Legacy evidence without an authoritative workflow generation cannot
+		// prove the release (same refusal as checkReviewerGate).
+		if (!workflow.authoritative) {
+			return false;
+		}
+		// A QA-exempt (forced) completion is durable proof the gates were NOT
+		// passed — it must not release the context map.
+		if (workflow.forcedCompletion === true) {
+			return false;
+		}
+		// The authoritative applicable-gate derivation: empty required gates
+		// are honored only with the exact no-mutation settlement proof (or a
+		// matched external attest); everything else still owes Stage A.
+		// r17 (§6): declared files come from the pass snapshot when supplied.
+		const currentDeclaredFiles =
+			snapshot?.declaredFiles ??
+			_planProofReaders.readCurrentTaskDeclaredFiles!(directory, taskId);
+		const derivedGates = deriveApplicableGateSet(evidence, {
+			currentDeclaredFiles,
+		});
+		if (derivedGates.missingGates.length > 0) {
+			return false;
+		}
+		// The workflow itself must have reached a terminal QA state (or be a
+		// legitimate read-only settlement) — recorded gates alone do not prove
+		// the lifecycle finished.
+		const workflowComplete =
+			workflow.state === 'tests_run' || workflow.state === 'complete';
+		return workflowComplete || derivedGates.readOnlyNoMutation;
+	} catch {
+		return false;
+	}
+}
+
+export async function resolveContextMapTaskReleaseStatus(
+	directory: string,
+	taskId: string,
+): Promise<'completed' | 'in_progress'> {
+	try {
+		if (!(await resolveTaskReleaseEvidenceProof(directory, taskId))) {
+			return 'in_progress';
+		}
+		const { loadPlanJsonOnly } = await import('../plan/manager.js');
+		const plan = await loadPlanJsonOnly(directory);
+		const task = plan?.phases
+			.flatMap((phase) => phase.tasks)
+			.find((t) => t.id === taskId);
+		return task?.status === 'completed' ? 'completed' : 'in_progress';
+	} catch {
+		return 'in_progress';
+	}
+}
+
+/**
+ * r17 audit repair (P1): read the task's CURRENT status and the plan's
+ * CURRENT identity hash from the plan.json projection with a single RAW
+ * read — deliberately NOT through the plan artifact cache (each cached load
+ * costs a stat plus a structuredClone of the entire plan, which would
+ * re-create the per-task plan-load budget the r16 repair removed) and not
+ * through a schema-validated parse (the fence only needs two fields).
+ * Fail-closed: any read/parse error, missing task, or non-string status
+ * yields null and the caller skips the promotion.
+ */
+function readCurrentTaskStatusAndIdentityFromPlan(
+	directory: string,
+	taskId: string,
+): { status: string; planIdentityHash: string } | null {
+	try {
+		const planPath = path.join(directory, '.swarm', 'plan.json');
+		const raw = _internals.readFileSync(planPath, 'utf-8');
+		const parsed = JSON.parse(raw) as {
+			swarm?: unknown;
+			title?: unknown;
+			phases?: Array<{
+				tasks?: Array<{ id?: unknown; status?: unknown }>;
+			}>;
+		};
+		if (typeof parsed.swarm !== 'string' || typeof parsed.title !== 'string') {
+			return null;
+		}
+		for (const phase of parsed.phases ?? []) {
+			for (const task of phase.tasks ?? []) {
+				if (task?.id === taskId) {
+					if (typeof task.status !== 'string') return null;
+					return {
+						status: task.status,
+						planIdentityHash: derivePlanIdentityHash({
+							swarm: parsed.swarm,
+							title: parsed.title,
+						}),
+					};
+				}
+			}
+		}
+		return null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * r14 audit repair (P1-5): the AUTHORITATIVE task-release promotion. The
+ * background completion observer (and the sync Task handoff) deliberately
+ * write only the non-final `'pending'` summary until the task is released;
+ * this function runs at the authoritative release point
+ * (update_task_status with status `completed`) and promotes the summary to
+ * `'approved'`.
+ *
+ * Never overwrites a terminal `'rejected'` entry (a positive verdict cannot
+ * erase an already-recorded negative one); idempotent; creates a minimal
+ * summary when no child ever recorded one.
+ *
+ * CONTRACT: the CALLER owns the release authority. This sync primitive
+ * promotes what it is told; the stale-plan fence (r17) lives in the
+ * production entry point {@link promoteContextMapTaskReleaseLocked}, which
+ * re-verifies the current authoritative task status under the context-map
+ * lock immediately before calling this function.
+ */
+export function promoteContextMapTaskRelease(
+	directory: string,
+	taskId: string,
+): void {
+	try {
+		// r16 audit repair (P1): a rebuild is only legitimate for a GENUINELY
+		// missing map. An existing-but-corrupt map must be preserved
+		// byte-for-byte — overwriting it with a fresh map would destroy the
+		// operator's recovery path for the damaged decisions/task history.
+		// The promotion is best-effort by contract; a skipped promotion is
+		// recovered by reconciliation once the map is repaired.
+		const readState = _internals.readContextMapState(directory);
+		if (readState.kind === 'unreadable') {
+			logger.warn(
+				`[context-map] ${directory}/.swarm/context-map.json exists but is corrupt or unreadable — preserving the original file; task-release promotion for task ${taskId} skipped (repair the map, then the next maintenance pass re-drives the promotion)`,
+			);
+			return;
+		}
+		const map =
+			readState.kind === 'ok'
+				? readState.map
+				: _internals.createEmptyContextMap();
+		const existing = map.task_history[taskId];
+		if (existing?.final_status === 'approved') return; // idempotent
+		if (existing?.final_status === 'rejected') {
+			// A terminal negative verdict is never overwritten by the release
+			// promotion — the negative result stays durably diagnosable.
+			return;
+		}
+		const summary: TaskContextSummary = existing
+			? { ...existing, final_status: 'approved' }
+			: {
+					task_id: taskId,
+					goal: '',
+					files_touched: [],
+					implementation_summary: '',
+					final_status: 'approved',
+				};
+		const next = _internals.appendTaskHistory(map, summary);
+		_internals.saveContextMap(next, directory);
+	} catch {
+		// The promotion must never block the authoritative status update.
+	}
+}
+
+/**
+ * r16 audit repair (P2): the COORDINATED task-release promotion. Wraps the
+ * whole load→promote→save cycle of {@link promoteContextMapTaskRelease} in
+ * the cross-process context-map write lock so a concurrent writer (the
+ * observer's child summary, the sync handoff, another process's
+ * reconciliation) cannot interleave its own read-modify-write and lose this
+ * promotion — or vice versa. Best-effort by the same contract as the sync
+ * variant: a lock failure skips the promotion (logged), and the next
+ * maintenance-point reconciliation recovers it.
+ */
+export async function promoteContextMapTaskReleaseLocked(
+	directory: string,
+	taskId: string,
+	lockTimeoutMs: number = CONTEXT_MAP_LOCK_BUDGET_MS.background,
+	expectedPlanIdentityHash?: string,
+): Promise<void> {
+	await withContextMapLock(
+		directory,
+		'update_task_status',
+		taskId,
+		() => {
+			// r17 audit repair (P1): STALE-PLAN FENCE. The reconciliation selects
+			// its candidates from a plan loaded BEFORE the per-task (async)
+			// evidence proof, and the authoritative task status can change in
+			// between — a rework flips completed → in_progress under a new
+			// workflow generation. The existing plan-identity fence does not
+			// catch this: `planIdentityHash` derives from `swarm` + `title` only,
+			// so a task-status change never changes it, and unstamped legacy
+			// evidence skips the mismatch check entirely. Re-read the task's
+			// CURRENT status here — under the context-map lock, immediately
+			// before the write — and skip the promotion unless it is still
+			// `completed`. No fresh `approved` marking is created for a task that
+			// is no longer released; the pending entry survives for the next
+			// maintenance pass.
+			//
+			// r17 (§6): when the caller derived its proofs from a pass snapshot
+			// (the reconciliation), it passes the snapshot's
+			// `expectedPlanIdentityHash`; the fence re-derives the CURRENT
+			// identity from the same raw read and skips on mismatch — a
+			// snapshot never replaces the authority check at the write point.
+			//
+			// The fence is a single RAW plan.json read (not the artifact cache) —
+			// a cached load costs a stat plus a structuredClone of the ENTIRE
+			// plan per promoted task, which would re-create the per-task
+			// plan-load budget the r16 repair removed.
+			//
+			// RESIDUAL RACE (documented, deliberately not claimed closed): the
+			// plan ledger's writes are not serialized against this context-map
+			// lock — no common authority boundary exists between the two stores.
+			// The fence closes the wide window (the evidence proof plus the lock
+			// wait) but a plan write racing inside the read→promote→save window
+			// itself can still interleave. A skipped promotion is fail-closed and
+			// recovered: the next maintenance-point reconciliation re-drives it
+			// once the task is released again.
+			const current = readCurrentTaskStatusAndIdentityFromPlan(
+				directory,
+				taskId,
+			);
+			if (current?.status !== 'completed') {
+				logger.warn(
+					`[context-map] task-release promotion for task ${taskId} skipped — the authoritative plan status is '${current?.status ?? 'task-missing'}' (not completed) at promotion time; the next maintenance pass re-drives it once the task is released`,
+				);
+				return;
+			}
+			if (
+				expectedPlanIdentityHash !== undefined &&
+				current.planIdentityHash !== expectedPlanIdentityHash
+			) {
+				logger.warn(
+					`[context-map] task-release promotion for task ${taskId} skipped — the plan identity changed since the reconciliation pass loaded it (stale proofs); the next maintenance pass re-derives everything`,
+				);
+				return;
+			}
+			promoteContextMapTaskRelease(directory, taskId);
+		},
+		lockTimeoutMs,
+	);
+}
+
+/**
+ * r15 audit repair (P3): idempotent reconciliation of context-map task
+ * releases after a lost promotion.
+ *
+ * `promoteContextMapTaskRelease` (and its caller in update_task_status) is
+ * best-effort by contract — the authoritative task release in the plan must
+ * never be rolled back by a context-map write failure. But before this
+ * repair, a failed promotion left the context map 'pending' FOREVER: the
+ * child closeout steps were already completed, so no closeout replay re-drove
+ * the promotion.
+ *
+ * This reconciliation reconstructs the promotion from the AUTHORITATIVE
+ * durable state alone — the plan's task status plus the recorded QA-gate
+ * evidence (the exact proof `resolveContextMapTaskReleaseStatus` applies,
+ * fail-closed: no promotion without full QA proof). It runs at existing
+ * maintenance points (observer maintenance pass, /swarm status, post-init
+ * background maintenance), so any later runtime recovers a lost promotion.
+ *
+ * r16 (P2, 7.2) cost bound: the plan is loaded ONCE per pass and the
+ * per-task work is the evidence proof only (`resolveTaskReleaseEvidenceProof`)
+ * — one bounded evidence-file read per pending completed task. Terminal
+ * entries are skipped before any I/O, so a steady-state pass is O(1) in
+ * plan reads (measured: 1 read, 2-4 ms at 1000 tasks).
+ *
+ * Guarantees:
+ * - the plan stays authoritative — this never touches plan state;
+ * - idempotent: `appendTaskHistory` upserts by task id, so repeated
+ *   reconciliations never duplicate task-history entries;
+ * - a terminal 'rejected' entry is never overwritten (same guard as the
+ *   promotion itself). NOTE (r15): the context-map data model carries no
+ *   workflow-generation identity on task entries, so a later reworked and
+ *   re-released task cannot be distinguished from the generation that was
+ *   rejected — per the audit, the negative-protection guard is NOT weakened
+ *   without a reproduced rework test; a rejected entry stays rejected;
+ * - gated on the context_map config — no context map is invented for
+ *   projects with the context map disabled;
+ * - failures are diagnosable (logged) and never throw.
+ */
+export async function reconcileContextMapTaskReleases(
+	directory: string,
+): Promise<void> {
+	try {
+		const { loadPluginConfig } = await import('../config/loader.js');
+		if (loadPluginConfig(directory).context_map?.enabled !== true) {
+			return;
+		}
+		const { loadPlanJsonOnly } = await import('../plan/manager.js');
+		const plan = await loadPlanJsonOnly(directory);
+		if (!plan) return;
+		const completedTasks = plan.phases
+			.flatMap((phase) => phase.tasks)
+			.filter((task) => task.status === 'completed');
+		if (completedTasks.length === 0) return;
+		// r16 audit repair (P1): reconcile may rebuild ONLY a genuinely
+		// missing map. An existing-but-corrupt map is preserved untouched —
+		// no promotion is derived from a damaged file, and the original bytes
+		// stay available for recovery. The condition is logged so the damage
+		// is diagnosable; reconciliation retries at the next maintenance
+		// point once the map is repaired.
+		const readState = _internals.readContextMapState(directory);
+		if (readState.kind === 'unreadable') {
+			logger.warn(
+				`[context-map] ${directory}/.swarm/context-map.json exists but is corrupt or unreadable — reconciliation skipped, original file preserved for recovery`,
+			);
+			return;
+		}
+		const map =
+			readState.kind === 'ok'
+				? readState.map
+				: _internals.createEmptyContextMap();
+		// r17 (§6): the once-per-pass READ-ONLY proof snapshot. The per-task
+		// proof previously raw-read plan.json TWICE per candidate
+		// (`resolveCurrentPlanIdentitySync` + `readCurrentTaskDeclaredFiles`);
+		// measured pre-repair: ~4000 physical plan.json opens for a
+		// 1000-task first pass. The snapshot supplies both values from the
+		// plan loaded ONCE above. Security: the snapshot is used only for
+		// this read-only proof computation — the promotion fence below
+		// re-verifies the CURRENT task status AND plan identity at the
+		// mandatory write point, so a plan that changed mid-pass fails
+		// closed.
+		const passPlanIdentityHash = derivePlanIdentityHash({
+			swarm: plan.swarm,
+			title: plan.title,
+		});
+		const declaredFilesByTask = deriveDeclaredFilesByTask(plan);
+		for (const task of completedTasks) {
+			const existing = map.task_history[task.id];
+			if (existing !== undefined && existing.final_status !== 'pending') {
+				// 'approved' is already done; 'rejected'/'blocked' are terminal
+				// verdicts the reconciliation must preserve.
+				continue;
+			}
+			// Fail-closed release proof: the plan status is already known
+			// (this loop iterates only completed tasks of the plan loaded
+			// ONCE above), so only the durable QA evidence is re-verified per
+			// task. r16 (P2, 7.2): the previous per-task
+			// resolveContextMapTaskReleaseStatus call re-loaded the plan N
+			// times per pass — every load is a stat plus a structuredClone of
+			// the ENTIRE plan (measured: 1000 redundant loads, ~2.9 s for a
+			// 1000-task first pass). Anything unreadable or unproven stays
+			// untouched.
+			const evidenceProven = await resolveTaskReleaseEvidenceProof(
+				directory,
+				task.id,
+				{
+					planIdentityHash: passPlanIdentityHash,
+					declaredFiles: declaredFilesByTask.get(task.id) ?? null,
+				},
+			);
+			if (evidenceProven) {
+				// r16 (P2): the coordinated promotion — the whole
+				// load→promote→save cycle runs under the cross-process
+				// context-map lock so a concurrent writer cannot lose it.
+				// r17 (P1): the acquisition wait is bounded to the maintenance
+				// budget — an unattended maintenance pass must not sit on a
+				// contended lock; a skipped promotion is re-driven by the
+				// next maintenance point.
+				// r17 (§6): the pass identity is passed to the promotion fence —
+				// a plan whose identity changed since the pass load fails
+				// closed at the write point (stale proofs are never written).
+				await promoteContextMapTaskReleaseLocked(
+					directory,
+					task.id,
+					CONTEXT_MAP_LOCK_BUDGET_MS.maintenance,
+					passPlanIdentityHash,
+				);
+			}
+		}
+	} catch (error) {
+		logger.warn(
+			`[context-map] task-release reconciliation failed (non-fatal; retried at the next maintenance point): ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		);
 	}
 }

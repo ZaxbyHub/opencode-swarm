@@ -40,7 +40,6 @@ src/background/pending-delegations.ts: 2
 src/background/pr-subscriptions.ts: 2
 src/commands/archive-sqlite.ts: 1
 src/context-map/capsule-persistence.ts: 1
-src/context-map/persistence.ts: 1
 src/context-map/telemetry.ts: 1
 src/db/legacy-import.ts: 1
 src/epic/legacy-migration.ts: 2

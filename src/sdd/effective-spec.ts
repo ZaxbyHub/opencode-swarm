@@ -32,6 +32,95 @@ const SPECKIT_REQUIRED_SECTIONS = [
 	'## Success Criteria',
 ] as const;
 
+/**
+ * SolCritic F-020 (gate-owned budget): ONE shared budget of directory-entry
+ * visits for a whole gate invocation. `withSpecScanBudget` installs it around
+ * a gate-owned scope; every charged dirent read below then decrements the
+ * SAME object, so exhaustion is cumulative across the openspec current-specs
+ * scan, the changes listing, every change's nested specs scan, Spec-Kit
+ * detection, and the presence fallback. Callers that run without an active
+ * budget (commands, status, tests) are unchanged — charging is a no-op then.
+ */
+let scanBudget: { remaining: number } | null = null;
+
+/** Total directory-entry visits one gate invocation may spend (SolCritic F-020). */
+export const SPEC_SCAN_ENTRY_BUDGET = 2000;
+
+/** Typed exhaustion signal: the gate entry point converts this into a retryable block. */
+export class SpecScanBudgetExceededError extends Error {
+	constructor() {
+		super(
+			'spec scan budget exceeded: the directory layout could not be fully enumerated',
+		);
+		this.name = 'SpecScanBudgetExceededError';
+	}
+}
+
+function chargeScanVisit(): void {
+	const budget = scanBudget;
+	if (budget === null) return;
+	if (budget.remaining <= 0) throw new SpecScanBudgetExceededError();
+	budget.remaining--;
+}
+
+/**
+ * Run `fn` under a gate-owned scan budget of `maxEntries` directory-entry
+ * visits. Reentrant-safe: a call made while a budget is already active SHARES
+ * that outer budget (it never mints a second one — that would double the
+ * gate's entry allowance) and always restores the previous state in `finally`.
+ */
+export function withSpecScanBudget<T>(maxEntries: number, fn: () => T): T {
+	const previous = scanBudget;
+	if (previous === null) {
+		scanBudget = { remaining: maxEntries };
+	}
+	try {
+		return fn();
+	} finally {
+		scanBudget = previous;
+	}
+}
+
+/**
+ * Incrementally enumerate ONE directory (`fs.opendirSync` — verified working
+ * on Bun/Windows), charging the shared budget at EVERY entry read BEFORE any
+ * filtering (SolCritic F-020): the budget bounds the enumeration work itself,
+ * so a wide layout cannot materialize unbounded dirent arrays. The directory
+ * is fully collected within budget; a budget overrun throws
+ * {@link SpecScanBudgetExceededError} instead of yielding a truncated listing
+ * (a truncated prefix must never be sorted or hashed). Returns `null` when the
+ * directory cannot be read — callers keep their existing skip semantics.
+ */
+function readChargedDirents(abs: string): fs.Dirent[] | null {
+	let handle: fs.Dir;
+	try {
+		handle = fs.opendirSync(abs);
+	} catch {
+		return null;
+	}
+	try {
+		const collected: fs.Dirent[] = [];
+		for (;;) {
+			const entry = handle.readSync();
+			if (entry === null) break;
+			chargeScanVisit();
+			collected.push(entry);
+		}
+		return collected;
+	} catch (error) {
+		if (error instanceof SpecScanBudgetExceededError) throw error;
+		// Bun defers the scandir to the first readSync, so open-time errors can
+		// surface here instead; both read as "unreadable directory" (skip).
+		return null;
+	} finally {
+		try {
+			handle.closeSync();
+		} catch {
+			// best effort
+		}
+	}
+}
+
 export type EffectiveSpecSource =
 	| 'swarm'
 	| 'openspec_projection'
@@ -202,12 +291,11 @@ function walkSpecFiles(root: string, startRel: string): OpenSpecArtifact[] {
 		const item = stack.pop();
 		if (!item || item.depth > MAX_WALK_DEPTH) continue;
 
-		let entries: fs.Dirent[];
-		try {
-			entries = fs.readdirSync(item.abs, { withFileTypes: true });
-		} catch {
-			continue;
-		}
+		// SolCritic F-020: charged incremental enumeration. Each directory is
+		// fully collected WITHIN budget (never a sorted truncated prefix), then
+		// the existing descending sort and artifact cap apply unchanged.
+		const entries = readChargedDirents(item.abs);
+		if (entries === null) continue;
 
 		const dirents = entries.filter(
 			(entry): entry is fs.Dirent => typeof entry?.name === 'string',
@@ -232,12 +320,10 @@ function listOpenSpecChanges(root: string): OpenSpecChange[] {
 	const changesDir = path.join(root, OPENSPEC_ROOT, 'changes');
 	if (!fs.existsSync(changesDir)) return [];
 
-	let entries: fs.Dirent[];
-	try {
-		entries = fs.readdirSync(changesDir, { withFileTypes: true });
-	} catch {
-		return [];
-	}
+	// SolCritic F-020: charged incremental enumeration — every change-dir
+	// entry is charged BEFORE the isDirectory/archive filters run.
+	const entries = readChargedDirents(changesDir);
+	if (entries === null) return [];
 
 	return entries
 		.filter((entry) => entry.isDirectory() && entry.name !== 'archive')
@@ -473,10 +559,9 @@ export function detectSpeckit(directory: string): SpeckitDetection {
 		return { markerPresent: true, features: [] };
 	}
 
-	let entries: fs.Dirent[];
-	try {
-		entries = fs.readdirSync(specsRoot, { withFileTypes: true });
-	} catch {
+	// SolCritic F-020: charged incremental enumeration of the feature scan.
+	const entries = readChargedDirents(specsRoot);
+	if (entries === null) {
 		return { markerPresent: true, features: [] };
 	}
 
@@ -1281,6 +1366,168 @@ export function resolveSddSourceSelection(
  * symmetric with "OpenSpec present (yields a projection)" and makes empty
  * `.specify/` a non-competing source, matching both citations.
  */
+/**
+ * True when any SDD projection source is detectable for this project: an explicit
+ * env/config selection, a Spec-Kit marker, or an openspec layout. The drift
+ * gate's markerless check uses this to tell a failed projection (retryable)
+ * apart from a genuinely deleted spec (SolCritic F-011/F-012).
+ */
+
+/** Total-entry budget for the size-agnostic presence walk (SolCritic F-017). */
+const PRESENCE_WALK_BUDGET = 2000;
+
+/**
+ * Bounded size-agnostic search for any *.md under dir (F-016). Depth- and
+ * work-bounded: state.visited counts every entry across the whole walk and
+ * state.exhausted marks a budget overrun, which the caller must treat as
+ * UNKNOWN (retryable), never as absence.
+ */
+/** Bounded search: does any subdirectory exist under dir? Shares the budget. */
+function hasAnySubdirUnder(
+	dir: string,
+	depth: number,
+	state: { visited: number; exhausted: boolean },
+): boolean {
+	if (depth > 2) return false;
+	let dirHandle: fs.Dir;
+	try {
+		dirHandle = fs.opendirSync(dir);
+	} catch {
+		return false;
+	}
+	try {
+		for (;;) {
+			const entry = dirHandle.readSync();
+			if (entry === null) break;
+			if (scanBudget !== null) {
+				// Shared gate budget active (SolCritic F-020): charge it and abort
+				// with the typed exhaustion signal — the gate entry point converts
+				// the throw into a retryable block, never an absence verdict.
+				chargeScanVisit();
+			} else if (++state.visited > PRESENCE_WALK_BUDGET) {
+				state.exhausted = true;
+				return false;
+			}
+			if (entry.isDirectory() && !entry.isSymbolicLink()) return true;
+		}
+	} catch (error) {
+		if (error instanceof SpecScanBudgetExceededError) throw error;
+		// Bun defers the scandir to the first readSync, so a missing root
+		// surfaces here: ENOENT is genuine absence; any other read error is
+		// unverifiable and must read as UNKNOWN, never absence (F-018).
+		if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return false;
+		state.exhausted = true;
+		return false;
+	} finally {
+		try {
+			dirHandle.closeSync();
+		} catch {
+			// best effort
+		}
+	}
+	return false;
+}
+
+function hasAnyMdUnder(
+	dir: string,
+	depth: number,
+	state: { visited: number; exhausted: boolean },
+): boolean {
+	if (depth > 8) return false;
+	// Incremental enumeration (opendirSync): readdirSync would materialize the
+	// whole directory before the budget could bound it (SolCritic F-018).
+	let dirHandle: fs.Dir;
+	try {
+		dirHandle = fs.opendirSync(dir);
+	} catch {
+		return false;
+	}
+	try {
+		for (;;) {
+			const entry = dirHandle.readSync();
+			if (entry === null) break;
+			if (scanBudget !== null) {
+				// Shared gate budget active (SolCritic F-020): charge it and abort
+				// with the typed exhaustion signal — the gate entry point converts
+				// the throw into a retryable block, never an absence verdict.
+				chargeScanVisit();
+			} else if (++state.visited > PRESENCE_WALK_BUDGET) {
+				state.exhausted = true;
+				return false;
+			}
+			if (entry.isSymbolicLink()) continue;
+			if (entry.isFile() && entry.name.endsWith('.md')) return true;
+			if (
+				entry.isDirectory() &&
+				hasAnyMdUnder(path.join(dir, entry.name), depth + 1, state)
+			) {
+				return true;
+			}
+		}
+	} catch (error) {
+		if (error instanceof SpecScanBudgetExceededError) throw error;
+		// Bun defers the scandir to the first readSync, so a missing root
+		// surfaces here: ENOENT is genuine absence; any other read error is
+		// unverifiable and must read as UNKNOWN, never absence (F-018).
+		if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return false;
+		state.exhausted = true;
+		return false;
+	} finally {
+		try {
+			dirHandle.closeSync();
+		} catch {
+			// best effort
+		}
+	}
+	return false;
+}
+
+export function sddProjectionSourcePresentSync(
+	directory: string,
+): boolean | 'unknown' {
+	try {
+		if (resolveSddSourceSelection(directory) !== undefined) return true;
+		const root = path.resolve(directory);
+		const speckit = detectSpeckit(root);
+		if (speckit.markerPresent && speckit.features.length > 0) return true;
+		// Mirror the build's own input scan: openspec counts as a source when its
+		// layout has at least one spec file or change. A layout with inputs whose
+		// projection still fails (no parsed requirements) is a projection FAILURE
+		// (retryable), not source absence (SolCritic F-015).
+		// The build's scans filter inputs (oversized files are dropped by
+		// fileArtifact, unparseable content by the parser), so a scan miss does not
+		// prove absence. Presence = any spec .md on disk under openspec/specs (bounded
+		// walk, size-agnostic) or any change entry; only a structurally empty layout
+		// is genuine absence (SolCritic F-014/F-015/F-016).
+		const walkState = { visited: 0, exhausted: false };
+		const foundSpec = hasAnyMdUnder(
+			path.join(root, OPENSPEC_ROOT, 'specs'),
+			0,
+			walkState,
+		);
+		if (foundSpec) return true;
+		// Budget exhausted without a find: presence is UNKNOWN, never absence.
+		if (walkState.exhausted) return 'unknown';
+		// The changes scan (listOpenSpecChanges) also materializes every entry, so
+		// presence here uses the same bounded incremental walk: any change directory
+		// under openspec/changes counts; an empty or absent layout is absence.
+		if (
+			hasAnySubdirUnder(path.join(root, OPENSPEC_ROOT, 'changes'), 0, walkState)
+		) {
+			return true;
+		}
+		// Budget exhausted without a find: presence is UNKNOWN, never absence.
+		if (walkState.exhausted) return 'unknown';
+		return false;
+	} catch (error) {
+		// A shared-budget overrun must reach the gate's entry point so it can
+		// become a typed retryable block — folding it into `false` would read
+		// as source absence and misclassify a deletion (SolCritic F-020).
+		if (error instanceof SpecScanBudgetExceededError) throw error;
+		return false;
+	}
+}
+
 export function readEffectiveSpecSync(
 	directory: string,
 	opts?: ReadEffectiveSpecOpts,

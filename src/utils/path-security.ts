@@ -33,6 +33,22 @@ export function isNonBlankAbsoluteDirectory(
 }
 
 /**
+ * Whether the string looks like a WINDOWS drive-absolute path
+ * (`C:\Users\...` or `C:/Users/...`).
+ *
+ * On non-Windows hosts such a string is NOT a usable project directory: the
+ * POSIX resolver treats it as a RELATIVE path, so runtime state would be
+ * silently materialized under `<cwd>/C:\...` (r17 §9.2: a combined test run
+ * created a literal `C:\Users\Administrator\.aws\credentials` directory in
+ * the repository root and a `.swarm/swarm.db` inside it). Storage sinks must
+ * refuse foreign-platform drive paths instead of resolving them relative to
+ * the process cwd.
+ */
+export function looksLikeWindowsDrivePath(value: unknown): boolean {
+	return typeof value === 'string' && /^[A-Za-z]:[\\/]/.test(value);
+}
+
+/**
  * Check if a string contains path traversal patterns.
  * Based on the most comprehensive implementation (test-runner.ts).
  * Checks: basic ../, isolated double dots, URL-encoded traversal,

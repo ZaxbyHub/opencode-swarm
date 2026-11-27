@@ -28,6 +28,12 @@ function actionableArgs(...args: string[]): string[] {
 		'write',
 		'--required-actions',
 		'run the type checker',
+		// #3820 H2/ASK-1: the evidence gate is active by default, so
+		// direct-text fixtures use the audited override (the refusal
+		// itself is pinned by the unforced negative legs).
+		'--force',
+		'--reason',
+		'audited direct-text promotion fixture',
 		...args,
 	];
 }
@@ -125,7 +131,7 @@ describe('/swarm promote Command Registration', () => {
 					command: 'swarm',
 					sessionID: 'test-123',
 					arguments:
-						'promote --applies-to-tools write --required-actions typecheck Always validate inputs at system boundaries',
+						'promote --applies-to-tools write --required-actions typecheck --force --reason "audited fixture" Always validate inputs at system boundaries',
 				},
 				output,
 			);
@@ -410,14 +416,25 @@ describe('/swarm promote Command Registration', () => {
 			expect(result).toContain('actionability_floor');
 		});
 
-		it('an entry with a predicate and a scope promotes without --force', async () => {
+		it('an entry with a predicate and a scope promotes WITH the audited override (unforced is refused)', async () => {
 			const result = await handlePromoteCommand(
 				tempDir,
 				actionableArgs('Prefer array-form spawn over shell strings always'),
 			);
 			expect(result).toContain('Promoted to hive');
 			expect(result).toContain('source: manual');
-			expect(result).not.toContain('manual-override');
+			expect(result).toContain('manual-override');
+			// Negative leg: the unforced form is refused by the evidence gate.
+			const unforced = actionableArgs(
+				'Distinct lesson: rotate the audit log key quarterly',
+			);
+			const fi = unforced.indexOf('--force');
+			const refused = await handlePromoteCommand(tempDir, [
+				...unforced.slice(0, fi),
+				...unforced.slice(fi + 3),
+			]);
+			expect(refused).toContain('Promotion blocked by policy');
+			expect(refused).toContain('validated_terminal_applications');
 		});
 
 		it('usage text documents the actionability flags', async () => {

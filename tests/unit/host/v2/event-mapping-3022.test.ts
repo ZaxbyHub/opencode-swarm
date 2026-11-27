@@ -73,12 +73,15 @@ describe('#3022 v2 event mapping', () => {
 		}
 	});
 
-	test('legacy session.status.updated keeps its session.idle mapping (vendored-type hosts)', () => {
+	// Type-preserving since the PR 3922 native-async work: the legacy name no
+	// longer terminalizes through session.idle (busy/retry must not run terminal
+	// cleanup). No captured or vendored host emits session.status.updated.
+	test('legacy session.status.updated maps type-preserving to session.status', () => {
 		const mapped = mapV2EventToV1({
 			type: 'session.status.updated',
 			data: { sessionID: 's5' },
 		});
-		expect(mapped?.type).toBe('session.idle');
+		expect(mapped?.type).toBe('session.status');
 	});
 
 	test('unknown event types remain unmapped', () => {

@@ -17,10 +17,11 @@ Before judging plan coverage, use `repo_map` `graph_health` and targeted `impact
 ### MODE: CRITIC-GATE
 Delegate plan to the active swarm's critic agent for review BEFORE any implementation begins.
 - Send the full plan.md content and codebase context summary
-- Explicitly reference "plan.md" or "critic-gate" in the dispatch prompt text. This lets the mechanical approval-recording gate reliably detect the review and record the critic's APPROVED verdict, which the EXECUTE-phase coder gate then requires.
+- Mark the dispatch explicitly with `MODE: CRITIC-GATE` in the prompt text. This is the ONLY marker the mechanical approval-recording gate accepts: the pre-execution plan binding (and therefore any automatic approval recording) requires the explicit `critic-gate` intent. A critic dispatch that merely mentions "plan.md" or "review the plan" is treated as an ordinary review and never auto-approves the EXECUTE-phase coder gate.
 - **APPROVED** → Proceed to MODE: EXECUTE
 - **NEEDS_REVISION** → Revise the plan based on critic feedback, then resubmit (max 2 cycles)
 - **REJECTED** → Inform the user of fundamental issues and ask for guidance before proceeding
+- **FRESH DISPATCH EVERY ROUND**: every CRITIC-GATE dispatch — the first review AND every re-review after NEEDS_REVISION or a material plan change — must launch a FRESH critic child. Never resume a prior critic child session (never pass `sessionID` to the subagent/Task tool, even though the host invites follow-ups). The durable delegation store tracks one launch per child session: a resumed round of a completed child can never be durably tracked, so its verdict is silently lost and the approval recorder never fires (`no_approved_snapshot`). The delegation gate rejects such resumes with `SWARM_CHILD_RESUME_UNTRACKABLE` — omit `sessionID` and dispatch a fresh child instead.
 
 ⛔ HARD STOP — Print this checklist before advancing to MODE: EXECUTE:
   [ ] the active swarm's critic agent returned a verdict

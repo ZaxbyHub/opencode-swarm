@@ -4,6 +4,7 @@ import {
 	BraveProvider,
 	createWebSearchProvider,
 	KeenableProvider,
+	SpecStreamProvider,
 	TavilyProvider,
 	WebSearchError,
 } from '../../../src/council/web-search-provider';
@@ -256,8 +257,9 @@ describe('createWebSearchProvider keenable credential scoping', () => {
 		expect(headersOf(call)['X-API-Key']).toBeUndefined();
 	});
 
-	test('freshness capability flag: only Keenable opts out', () => {
+	test('freshness capability flag: Keenable and SpecStream opt out', () => {
 		expect(new KeenableProvider().supportsFreshness).toBe(false);
+		expect(new SpecStreamProvider('k').supportsFreshness).toBe(false);
 		expect(new TavilyProvider('k').supportsFreshness).toBeUndefined();
 		expect(new BraveProvider('k').supportsFreshness).toBeUndefined();
 	});

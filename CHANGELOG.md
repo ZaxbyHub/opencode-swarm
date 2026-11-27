@@ -1,5 +1,54 @@
 # Changelog
 
+## [7.205.12](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.205.11...v7.205.12) (2026-11-27)
+
+
+### Bug Fixes
+
+* **background:** a finished background coder no longer blocks every later dispatch ([963eae1](https://github.com/ZaxbyHub/opencode-swarm/commit/963eae1ee617e9cf7f8324470b5f3b2226817ee3))
+* **pr-monitor:** decouple terminal-event latch from cleanup retry ([fef114c](https://github.com/ZaxbyHub/opencode-swarm/commit/fef114cab4654419d72da972b5cb62dc0d621464))
+* **pr-monitor:** emit terminal PR events at most once per worker lifetime ([78f6e45](https://github.com/ZaxbyHub/opencode-swarm/commit/78f6e45440f1db73ad5b51068935cef77c130e54))
+* **spec-drift:** canonical spec_write rebinds the plan specHash before the marker materializes ([e2d0f27](https://github.com/ZaxbyHub/opencode-swarm/commit/e2d0f2751c6bfe914cefffef2ccdfa67a9f7b6a8))
+* **swarm:** async subagent lifecycle repairs (native v2 async, context-map closeout, plan-critic approvals) ([b4b41db](https://github.com/ZaxbyHub/opencode-swarm/commit/b4b41db8e668550f1d6d488260c39c97e980d147))
+* **workflow:** a coder-settlement WAL commit survives its receipt-append failure ([#2525](https://github.com/ZaxbyHub/opencode-swarm/issues/2525) replay) ([9feb6f4](https://github.com/ZaxbyHub/opencode-swarm/commit/9feb6f4dd365ceae20335471d2f0ac232384031f))
+* **workflow:** a Stage-B re-dispatch reclaims its route slot instead of wedging forever ([02f0a26](https://github.com/ZaxbyHub/opencode-swarm/commit/02f0a2664014bc95f2a21b597b44da87f29c426b))
+
+## [7.205.11](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.205.10...v7.205.11) (2026-11-26)
+
+
+### Bug Fixes
+
+* **ci:** give the promote-visibility integration fixtures the audited override ([be18f2a](https://github.com/ZaxbyHub/opencode-swarm/commit/be18f2ae98a06905269e5b5c205b3f6c105b7834))
+* **ci:** widen the record-race overflow margin so it holds on Linux ([f79e0e4](https://github.com/ZaxbyHub/opencode-swarm/commit/f79e0e4c64e7d42fc2139109ba11e274ef1061fe))
+* **security:** residue quarantine containment, hive promotion provenance, and external-skill approval identity ([#3836](https://github.com/ZaxbyHub/opencode-swarm/issues/3836)/[#3820](https://github.com/ZaxbyHub/opencode-swarm/issues/3820)/[#3822](https://github.com/ZaxbyHub/opencode-swarm/issues/3822)) ([af077a4](https://github.com/ZaxbyHub/opencode-swarm/commit/af077a4501df0c2b341d29f5f701c5a267294dd5))
+* **security:** resolve [#3942](https://github.com/ZaxbyHub/opencode-swarm/issues/3942) review feedback (verifier scope, CR digest bypass, revoke, sweep, docs) ([c814e53](https://github.com/ZaxbyHub/opencode-swarm/commit/c814e53d6cb1fa5734d6b915856a1a84d8399c6e))
+
+## [7.205.10](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.205.9...v7.205.10) (2026-11-26)
+
+
+### Bug Fixes
+
+* **observability:** repoint store_lock_stale_broken citation to :691 ([e7c10f0](https://github.com/ZaxbyHub/opencode-swarm/commit/e7c10f006cfac1452d96b3af0b01e50b2f646303))
+* **observability:** repoint store_lock_stale_broken producer citation to :688 ([#3934](https://github.com/ZaxbyHub/opencode-swarm/issues/3934)) ([4134926](https://github.com/ZaxbyHub/opencode-swarm/commit/4134926ac8b10c3aa2b43973a3b62f72c3936e82))
+* **parallel:** guard statSync in ownerless ageMs fallback; add regression tests ([#3934](https://github.com/ZaxbyHub/opencode-swarm/issues/3934)) ([c1e8342](https://github.com/ZaxbyHub/opencode-swarm/commit/c1e8342f9da035f9d354fddbda4460c1bc1045aa))
+* **parallel:** recover ownerless plan locks past TTL on acquire path ([#3934](https://github.com/ZaxbyHub/opencode-swarm/issues/3934)) ([427da81](https://github.com/ZaxbyHub/opencode-swarm/commit/427da81bea0746b80a353f92b14774ca4b58e402))
+* **parallel:** recover ownerless plan locks past TTL on acquire path ([#3934](https://github.com/ZaxbyHub/opencode-swarm/issues/3934)) ([97928ce](https://github.com/ZaxbyHub/opencode-swarm/commit/97928cecb5a0ad9a4d39688d1a130caa1edbd638))
+* **ratchet:** repoint target-constant-tmp producer citation for file-locks temp ([#3934](https://github.com/ZaxbyHub/opencode-swarm/issues/3934)) ([da1341c](https://github.com/ZaxbyHub/opencode-swarm/commit/da1341c9faa8d23ce60d6bff840b02bf3d615fd2))
+* **registry:** repoint file-locks citations after comment reflow ([#3934](https://github.com/ZaxbyHub/opencode-swarm/issues/3934)) ([07163da](https://github.com/ZaxbyHub/opencode-swarm/commit/07163da36c624125b78e418cc9bce1bd5557afd7))
+* **registry:** repoint file-locks citations after line shifts ([#3934](https://github.com/ZaxbyHub/opencode-swarm/issues/3934)) ([5491b65](https://github.com/ZaxbyHub/opencode-swarm/commit/5491b654eb71897238ba726895b67a2b056279a9))
+* **security:** remove useless catch in replay-identity (biome noUselessCatch) ([f3bb2eb](https://github.com/ZaxbyHub/opencode-swarm/commit/f3bb2eb7fb47ab88d7abecb4d227f9bb9553f225))
+
+## [7.205.9](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.205.8...v7.205.9) (2026-11-25)
+
+
+### Bug Fixes
+
+* **ci:** macOS realpath containment in resolveSafeScopeFileForUnlink; register scope-persistence blind spots ([#3889](https://github.com/ZaxbyHub/opencode-swarm/issues/3889)) ([4699c65](https://github.com/ZaxbyHub/opencode-swarm/commit/4699c652940423b753b6c8b84e67c5f449c102eb))
+* **ci:** re-pin retention-registry citations after scope-persistence comment shift ([#3889](https://github.com/ZaxbyHub/opencode-swarm/issues/3889)) ([41050b7](https://github.com/ZaxbyHub/opencode-swarm/commit/41050b7f34bcb5d44528c2bd26fb34097f632b0a))
+* **ci:** re-pin retention-registry citations after scope-persistence line shifts ([#3889](https://github.com/ZaxbyHub/opencode-swarm/issues/3889)) ([fbb83d1](https://github.com/ZaxbyHub/opencode-swarm/commit/fbb83d1eec7ab321e6ded191b552fb2f1c6e89fc))
+* **scope:** scope-binding store lifecycle — deny ledger, class-faithful diagnostics, reset recovery, tombstone preservation ([#3889](https://github.com/ZaxbyHub/opencode-swarm/issues/3889), [#3900](https://github.com/ZaxbyHub/opencode-swarm/issues/3900)) ([106075e](https://github.com/ZaxbyHub/opencode-swarm/commit/106075e58e17a6e4e70399aa5254bc3f6ab3810e))
+* **scope:** scope-binding store lifecycle — deny ledger, class-faithful diagnostics, reset recovery, tombstone preservation ([#3889](https://github.com/ZaxbyHub/opencode-swarm/issues/3889), [#3900](https://github.com/ZaxbyHub/opencode-swarm/issues/3900)) ([cb4dcc8](https://github.com/ZaxbyHub/opencode-swarm/commit/cb4dcc8b415a3682e6c3537433404c83b9d855cc))
+
 ## [7.205.8](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.205.7...v7.205.8) (2026-11-24)
 
 

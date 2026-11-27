@@ -77,7 +77,27 @@ beforeEach(async () => {
 	await initLedger(dir, derivePlanId(PLAN));
 	await updateTaskStatus(dir, '1.1', 'pending');
 	ensureAgentSession('session-cursor-drift', 'architect');
-	await createDelegationGateHook(makeConfig(), dir).toolAfter(
+	const gate = createDelegationGateHook(makeConfig(), dir);
+	// The plan-critic approval recorder refuses an APPROVED verdict that has no
+	// pre-execution dispatch baseline (r14 audit repair P1-6.3 in
+	// src/plan/critic-approval.ts — fail-closed against unproven automatic
+	// approvals). A real host always runs the gate's toolBefore before the Task
+	// tool executes, so the fixture must drive the same two-phase dispatch for
+	// the approval snapshot to be recorded at all.
+	await gate.toolBefore(
+		{
+			tool: 'Task',
+			sessionID: 'session-cursor-drift',
+			callID: 'critic-cursor-drift',
+		},
+		{
+			args: {
+				subagent_type: 'critic',
+				prompt: 'MODE: CRITIC-GATE\nEvaluate this plan before implementation.',
+			},
+		},
+	);
+	await gate.toolAfter(
 		{
 			tool: 'Task',
 			sessionID: 'session-cursor-drift',

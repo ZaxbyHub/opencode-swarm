@@ -81,8 +81,11 @@ describe('#1850 cohort config fingerprint inputs (acceptance #10, #13)', () => {
 	 * AWS arm reorder); algorithm unchanged, golden digest identical.
 	 * #3743/#3882: version 4 — REDACTION_POLICY_SALT 3→4 (Cf/DI fill tolerance);
 	 * algorithm unchanged, golden digest identical to the v2/v3 pin.
+	 * #3893/#3915: version 5 — REDACTION_POLICY_SALT 4→5 (PEM bounded/fallback
+	 * arms, Mn/U+2800 fill classes, jws_span union); algorithm unchanged,
+	 * golden digest identical to the v2/v3/v4 pin.
 	 */
-	test('golden digest pins the fingerprint algorithm (version 4)', () => {
+	test('golden digest pins the fingerprint algorithm (version 5)', () => {
 		const golden: MemoryCohortFingerprintInput = {
 			provider: 'sqlite',
 			redaction_policy_version: 2000029,
@@ -91,7 +94,7 @@ describe('#1850 cohort config fingerprint inputs (acceptance #10, #13)', () => {
 			embedding_version: 'v1',
 		};
 		expect(computeMemoryCohortFingerprint(golden)).toBe('125223b54843');
-		expect(FINGERPRINT_ALGORITHM_VERSION).toBe(4);
+		expect(FINGERPRINT_ALGORITHM_VERSION).toBe(5);
 	});
 	test('golden digest is independent of key insertion order', () => {
 		const reordered = {
@@ -137,9 +140,9 @@ describe('#2062 F-012 classifyStoredFingerprintAlgorithmVersion', () => {
 		expect(classifyStoredFingerprintAlgorithmVersion(undefined)).toEqual({
 			status: 'mismatch',
 			storedVersion: 1,
-			// #3743: current algorithm version is 4 (salt bump with the
-			// Cf/DI fill tolerance).
-			currentVersion: 4,
+			// #3743: v4 (Cf/DI salt bump). #3893/#3915: v5 (this
+			// cluster: PEM arms, Mn/U+2800 fills, jws_span).
+			currentVersion: 5,
 		});
 	});
 
@@ -218,13 +221,14 @@ describe('#1850 SQLite provider fingerprint enforcement (acceptance #10 fail-clo
 		// takes the fail-open path — see the legacy tests below).
 		// #3382: the current version is now 3; a stored 2 is a KNOWN OLD
 		// version and would take the mismatch/fail-open re-link path, so the
-		// fixture must carry 4 (#3743 salt bump) to keep exercising the
-		// fail-closed compare.
+		// fixture must carry the CURRENT version to keep exercising the
+		// fail-closed compare. #3893/#3915: the current version is 5 (salt
+		// 4→5), so the fixture stamps 5 (#3743 carried 4 in its day).
 		writeFileSync(
 			path.join(cohortRoot, 'memory-cohort-config.json'),
 			JSON.stringify({
 				fingerprint: 'deadbeefdead',
-				algorithm_version: 4,
+				algorithm_version: FINGERPRINT_ALGORITHM_VERSION,
 			}),
 			'utf-8',
 		);
@@ -479,15 +483,11 @@ describe('#2062 F-012 cohort config algorithm_version handling', () => {
 			expect(hasWarn(warnings, /was fingerprinted with algorithm/)).toBe(false);
 		});
 
-		/**
-		 * The regression the closeout critic caught. Every reader defaulted an
-		 * ABSENT `algorithm_version` to `FINGERPRINT_ALGORITHM_VERSION`, so the
-		 * gate could never fire for a legacy file: the first bump to 2 would make
-		 * every pre-field file on disk claim version 2, skip the gate, and
-		 * byte-compare a v1 digest against a v2 expected value — a hard throw in
-		 * the SQLite provider. The stored digest is deliberately wrong, standing
-		 * in for a real v1 digest that cannot equal the v2 expectation.
-		 */
+		// Closeout-critic regression: readers used to default an ABSENT
+		// algorithm_version to the CURRENT version, so a legacy file could never
+		// trip the gate — it would byte-compare a v1 digest against a v2
+		// expectation and hard-throw in the SQLite provider. Wrong digest on
+		// purpose: it stands in for a real v1 digest.
 		test(`legacy file under a simulated version bump warns, never throws (${name})`, async () => {
 			fingerprintInternals.currentAlgorithmVersion = 2;
 			const cohortRoot = writeStoredConfig({ fingerprint: 'deadbeefdead' });

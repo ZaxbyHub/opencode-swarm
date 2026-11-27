@@ -328,6 +328,29 @@ export async function collectPhaseGateReport(input: {
 	};
 }
 
+/**
+ * #3915 AC5: the critical-directive gate's receipt-lock timeout, classified as
+ * retryable plan-commit contention. The directive gate reads the
+ * knowledge-receipt ledger under the same exclusive receipt lock a concurrent
+ * commit winner holds; when that bounded read times out (RECEIPT_LOCK_TIMEOUT)
+ * the gate entry carries code PHASE_COMMIT_LOCKED, and every response path
+ * that holds a collected report must surface that contention class instead of
+ * a permanent blocked/stale classification. Returns the failing entry only
+ * when it IS the report's first failure — a report whose first failure is
+ * anything else keeps its own classification.
+ */
+export function findPhaseCommitLockContention(
+	report: PhaseGateReport,
+): PhaseGateEntry | undefined {
+	const firstFailure = report.entries.find(
+		(entry) => entry.outcome === 'block' || entry.outcome === 'error',
+	);
+	if (!firstFailure || firstFailure.id !== 'critical_directives') {
+		return undefined;
+	}
+	return firstFailure.code === 'PHASE_COMMIT_LOCKED' ? firstFailure : undefined;
+}
+
 export function formatPhaseGateCompatibility(report: PhaseGateReport): {
 	success: boolean;
 	phase: number;
@@ -346,6 +369,8 @@ export function formatPhaseGateCompatibility(report: PhaseGateReport): {
 	recovery_guidance?: string;
 	phase_council_required?: boolean;
 	final_council_required?: boolean;
+	/** #3915 AC5: top-level retry recovery for the contention class only. */
+	recovery?: PhaseGateRecovery;
 } {
 	const firstFailure = report.entries.find(
 		(entry) => entry.outcome === 'block' || entry.outcome === 'error',
@@ -377,13 +402,21 @@ export function formatPhaseGateCompatibility(report: PhaseGateReport): {
 			dispatched.add(actor);
 		}
 	}
+	// #3915 AC5: a receipt-lock timeout on the directive gate is retryable
+	// concurrent-commit contention (the losing caller has written nothing), so
+	// it maps to 'incomplete' alongside REQUIRED_AGENTS_MISSING and its entry
+	// recovery is lifted to a TOP-LEVEL recovery field — the retry substance
+	// must not stay buried inside gate_report.entries.
+	const receiptLockContention =
+		firstFailure?.code === 'PHASE_COMMIT_LOCKED' ? firstFailure : undefined;
 	return {
 		success: report.outcome === 'pass',
 		phase: report.phase,
 		status:
 			report.outcome === 'pass'
 				? 'success'
-				: firstFailure?.code === 'REQUIRED_AGENTS_MISSING'
+				: firstFailure?.code === 'REQUIRED_AGENTS_MISSING' ||
+						receiptLockContention !== undefined
 					? 'incomplete'
 					: 'blocked',
 		...(firstFailure
@@ -402,6 +435,9 @@ export function formatPhaseGateCompatibility(report: PhaseGateReport): {
 			: {}),
 		...(retrospectiveEntry?.retrospective_gate
 			? { retrospective_gate: retrospectiveEntry.retrospective_gate }
+			: {}),
+		...(receiptLockContention?.recovery
+			? { recovery: receiptLockContention.recovery }
 			: {}),
 	};
 }

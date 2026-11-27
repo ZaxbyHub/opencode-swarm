@@ -72,6 +72,12 @@ export function makeConfig(
 		contradiction_quarantine_window_days: 30,
 		promoted_demotion_min_negative_phases: 3,
 		promoted_demotion_signal_threshold: -0.3,
+		// #3820 note: since the schema default for promotion_min_terminal_applications
+		// became 1, these explicit 0/0 values are the DOCUMENTED OPERATOR OPT-OUT
+		// (gate satisfied by absence). Every suite that consumes makeConfig()
+		// intends the evidence gate NOT to interfere (it targets other gates /
+		// routes); suites that exercise the gate set explicit raised thresholds
+		// themselves (e.g. hive-promotion-independence.test.ts, the MAJOR-1 leg).
 		promotion_min_terminal_applications: 0,
 		promotion_min_distinct_cohorts: 0,
 		directive_min_confidence: 0.75,

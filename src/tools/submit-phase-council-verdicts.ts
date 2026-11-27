@@ -32,6 +32,10 @@ import {
 	truncateObjectForJson,
 } from '../memory/reward-capture';
 import { loadPlan } from '../plan/manager.js';
+import {
+	redactEvidenceDeep,
+	redactEvidenceText,
+} from '../security/evidence-redaction';
 import * as logger from '../utils/logger';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 import { createSwarmTool } from './create-tool';
@@ -443,10 +447,25 @@ async function writePhaseCouncilEvidence(
 				timestamp: synthesis.timestamp,
 				verdict: synthesis.overallVerdict,
 				quorumSize: synthesis.quorumSize,
-				phaseSummary: synthesis.phaseSummary ?? '',
-				requiredFixes: synthesis.requiredFixes,
-				advisoryNotes: synthesis.advisoryNotes,
-				advisoryFindings: synthesis.advisoryFindings,
+				// #3915 AC2 (pattern: write-hallucination-evidence.ts / PR #3905):
+				// the model-authored free text of the persisted entry crosses the
+				// DURABLE evidence boundary here — redact at the write boundary.
+				// Allowlisted field map: phaseSummary (string) and advisoryNotes
+				// (string[]) via redactEvidenceText; requiredFixes AND
+				// advisoryFindings are BOTH CouncilFinding[]
+				// (src/council/types.ts:96) — object arrays with model-authored
+				// prose — via redactEvidenceDeep, which preserves structural
+				// identity (keys, array order, enum/digest leaves). Enum/bool/
+				// digest fields (verdict, quorumSize, identity digests, attemptId)
+				// are untouched. The response-only fields (memberVerdicts,
+				// unifiedFeedbackMd) are NOT persisted and stay raw for the
+				// calling agent — this is the persisted copy only.
+				phaseSummary: redactEvidenceText(synthesis.phaseSummary ?? ''),
+				requiredFixes: redactEvidenceDeep(synthesis.requiredFixes),
+				advisoryNotes: synthesis.advisoryNotes.map((note) =>
+					redactEvidenceText(note),
+				),
+				advisoryFindings: redactEvidenceDeep(synthesis.advisoryFindings),
 				roundNumber: synthesis.roundNumber,
 				allCriteriaMet: synthesis.allCriteriaMet,
 				attemptId,

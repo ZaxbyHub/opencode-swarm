@@ -393,6 +393,18 @@ async function collectBackgroundWorkStatus(
 	} catch {
 		// observation only; the facts ring records the failure
 	}
+	// r15 audit repair (P3): recover context-map task-release promotions
+	// lost to a best-effort promotion failure at update_task_status.
+	// Idempotent, config-gated, fail-closed on QA proof; best-effort — a
+	// status command must never fail because of it.
+	try {
+		const { reconcileContextMapTaskReleases } = await import(
+			'../context-map/post-agent-update.js'
+		);
+		await reconcileContextMapTaskReleases(directory);
+	} catch {
+		// observation only; the next maintenance point retries
+	}
 	const counts = {
 		pending: 0,
 		running: 0,
@@ -1159,7 +1171,7 @@ export function formatStatusMarkdown(status: StatusData): string {
 		lines.push(
 			'',
 			`**Spec drift detected**: ${reason} (stored: ${stored}, current: ${current})`,
-			'Run `/swarm clarify` to enter spec repair mode. Clarify alone does not clear drift: rewrite the spec so recovery can reconcile it, or run `/swarm acknowledge-spec-drift` to dismiss.',
+			'Run `/swarm clarify` to enter spec repair mode (clarify alone does not clear drift). Agent-executable repair: persist the accepted spec through the canonical spec_write tool — its drift recovery reconciles the plan hash and clears the marker. The user may also run `/swarm acknowledge-spec-drift` to dismiss.',
 		);
 	}
 
@@ -1561,7 +1573,7 @@ function renderNoActivePlanStatusTail(statusData: StatusData): string {
 			'No active swarm plan found.',
 			'',
 			`**Spec drift detected**: ${reason} (stored: ${stored}, current: ${current})`,
-			'Run `/swarm clarify` to enter spec repair mode. Clarify alone does not clear drift: rewrite the spec so recovery can reconcile it, or run `/swarm acknowledge-spec-drift` to dismiss.',
+			'Run `/swarm clarify` to enter spec repair mode (clarify alone does not clear drift). Agent-executable repair: persist the accepted spec through the canonical spec_write tool — its drift recovery reconciles the plan hash and clears the marker. The user may also run `/swarm acknowledge-spec-drift` to dismiss.',
 			...(decisionDriftLines ?? []),
 		].join('\n');
 	}

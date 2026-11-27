@@ -1,11 +1,11 @@
 /**
  * Web search provider abstraction for the General Council Mode.
  *
- * Three concrete providers (Tavily, Brave, Keenable) plus a factory that
+ * Four concrete providers (Tavily, Brave, Keenable, SpecStream) plus a factory that
  * selects one based on `GeneralCouncilConfig.searchProvider`. Pure HTTP
  * layer — no tool wiring or prompt rendering. Uses the native `fetch` API
  * (Bun-compatible); no external HTTP libraries. Keenable is opt-in and
- * works without a key.
+ * works without a key. SpecStream is opt-in and needs SPECSTREAM_API_KEY.
  *
  * Errors are surfaced as typed exceptions:
  *   - WebSearchConfigError — missing API key (factory)
@@ -351,13 +351,124 @@ export class KeenableProvider implements WebSearchProvider {
 	}
 }
 
+interface SpecStreamResponse {
+	data?: {
+		sources?: Array<{
+			title?: string;
+			url?: string;
+			snippet?: string;
+		}>;
+	};
+}
+
+/**
+ * SpecStream Search API (`GET /v1/web-search`). Results are the ranked
+ * `data.sources`; `data.answer`, which the API adds for some factual
+ * questions, is not mapped so every provider returns the same shape.
+ */
+export class SpecStreamProvider implements WebSearchProvider {
+	readonly supportsFreshness = false;
+
+	constructor(private readonly apiKey: string) {}
+
+	async search(
+		query: string,
+		maxResults: number,
+		_options: WebSearchOptions = {},
+	): Promise<WebSearchResult[]> {
+		const url = new URL('https://api.specstream.ai/v1/web-search');
+		url.searchParams.set('q', query);
+		url.searchParams.set('num', String(maxResults));
+
+		const timeoutError = new WebSearchError(
+			`SpecStream search timed out after ${SEARCH_TIMEOUT_MS}ms`,
+		);
+		type Outcome =
+			| { kind: 'http'; status: number }
+			| { kind: 'json-error'; error: unknown }
+			| { kind: 'ok'; body: unknown };
+		let outcome: Outcome;
+		try {
+			// The body is read inside the deadline: withTimeoutSignal stops its timer
+			// once the awaited operation settles, so a server that sends headers and
+			// then stalls the body must not be able to outlive it.
+			outcome = await withTimeoutSignal<Outcome>(
+				async (signal) => {
+					const res = await fetch(url.toString(), {
+						method: 'GET',
+						headers: {
+							Authorization: `Bearer ${this.apiKey}`,
+							Accept: 'application/json',
+						},
+						signal,
+						// The Authorization header must never follow a redirect off
+						// api.specstream.ai (same policy as Keenable).
+						redirect: 'error',
+					});
+					if (!res.ok) return { kind: 'http', status: res.status };
+					try {
+						return { kind: 'ok', body: await res.json() };
+					} catch (error) {
+						return { kind: 'json-error', error };
+					}
+				},
+				SEARCH_TIMEOUT_MS,
+				timeoutError,
+			);
+		} catch (err) {
+			if (err === timeoutError) throw err;
+			if (
+				err instanceof Error &&
+				((err as { code?: unknown }).code === 'UnexpectedRedirect' ||
+					/redirect/i.test(err.message))
+			) {
+				throw new WebSearchError(
+					'SpecStream request was redirected (refused)',
+					err,
+				);
+			}
+			throw new WebSearchError(
+				`SpecStream network error for query "${query}"`,
+				err,
+			);
+		}
+
+		if (outcome.kind === 'http') {
+			throw new WebSearchError(
+				`SpecStream HTTP ${outcome.status} for query "${query}"`,
+			);
+		}
+		if (outcome.kind === 'json-error') {
+			throw new WebSearchError(
+				'SpecStream returned non-JSON response',
+				outcome.error,
+			);
+		}
+		const body = outcome.body;
+
+		const sources = (body as SpecStreamResponse | null)?.data?.sources;
+		if (!Array.isArray(sources)) {
+			return [];
+		}
+
+		const mapped: WebSearchResult[] = [];
+		for (const s of sources) {
+			if (typeof s?.title !== 'string' || typeof s?.url !== 'string') continue;
+			// Parity with Tavily/Brave/Keenable: results without a snippet are dropped.
+			if (typeof s.snippet !== 'string' || s.snippet === '') continue;
+			mapped.push({ title: s.title, url: s.url, snippet: s.snippet, query });
+		}
+		return mapped;
+	}
+}
+
 /**
  * Resolve the API key from config first, then env var fallback (Tavily and
  * Brave). Keenable is env-only (see below). Returns undefined if no key is
  * set so callers can decide how to surface that.
  */
 function resolveApiKey(
-	provider: 'tavily' | 'brave' | 'keenable',
+	provider: 'tavily' | 'brave' | 'keenable' | 'specstream',
 	configKey?: string,
 ): string | undefined {
 	// Credential scoping: `council.general.searchApiKey` is a single shared
@@ -366,6 +477,13 @@ function resolveApiKey(
 	// reads KEENABLE_API_KEY only; blank/whitespace means keyless.
 	if (provider === 'keenable') {
 		const fromEnv = process.env.KEENABLE_API_KEY?.trim();
+		return fromEnv && fromEnv.length > 0 ? fromEnv : undefined;
+	}
+	// SpecStream follows the same scoping as Keenable (#3762): its key comes
+	// only from SPECSTREAM_API_KEY, so a Tavily/Brave searchApiKey is never
+	// sent to it as a Bearer token.
+	if (provider === 'specstream') {
+		const fromEnv = process.env.SPECSTREAM_API_KEY?.trim();
 		return fromEnv && fromEnv.length > 0 ? fromEnv : undefined;
 	}
 	if (configKey && configKey.length > 0) {
@@ -382,6 +500,16 @@ export function createWebSearchProvider(
 ): WebSearchProvider {
 	if (config.searchProvider === 'keenable') {
 		return new KeenableProvider(resolveApiKey('keenable'));
+	}
+	if (config.searchProvider === 'specstream') {
+		const key = resolveApiKey('specstream');
+		if (!key) {
+			throw new WebSearchConfigError(
+				'No API key for search provider "specstream". Export SPECSTREAM_API_KEY ' +
+					'(council.general.searchApiKey is not used for SpecStream). Keys: https://specstream.ai/workspace/keys',
+			);
+		}
+		return new SpecStreamProvider(key);
 	}
 	const apiKey = resolveApiKey(config.searchProvider, config.searchApiKey);
 	if (!apiKey) {
