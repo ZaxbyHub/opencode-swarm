@@ -65,13 +65,119 @@ const RUN_TIMEOUT_MS = 120_000;
 const BUILD_TIMEOUT_MS = 300_000;
 const MAX_CAPTURE = 4_000_000;
 
-function redact(text) {
+export function redact(text) {
 	// Redact the local user name (home-directory segment) from any printed
 	// or captured text — handles both slash styles; idempotent.
+	// NOTE: this runs over the WHOLE capture that classifyHostRun scans, so it
+	// is deliberately kept narrow and verdict-neutral. The broader privacy
+	// rules for the (public) timeout dump live in redactLogLine below and are
+	// applied at print time only.
 	return text.replace(
 		/((?:[\\/]{1,2})Users(?:[\\/]{1,2}))([^\\/"'\s:,}]{1,64})/g,
 		'$1<user>',
 	);
+}
+
+/**
+ * Print-time-only home-path redaction for the timeout dump (never applied to
+ * the text classifyHostRun reads): the home segment in any case, POSIX
+ * /home/<user>, and a space-containing user name when a path separator or
+ * quote follows it (`C:\Users\John Smith\x`, `"C:\Users\John Smith"`).
+ * Continuation words exclude `=` so key=value log tokens are never absorbed.
+ * A multi-word name with no following separator or quote is a documented,
+ * accepted residual (taking it would swallow free text); CI runner accounts
+ * (runner / runneradmin) contain no spaces. Idempotent.
+ */
+export function redactLogLine(text) {
+	return text.replace(
+		/((?:[\\/]{1,2})(?:Users|home)(?:[\\/]{1,2}))((?:[^\\/"'\s:,}=]{1,64}(?: [^\\/"'\s:,}=]{1,64}){1,2}(?=[\\/"']))|[^\\/"'\s:,}]{1,64})/gi,
+		'$1<user>',
+	);
+}
+
+// Bounded per-stream tail kept by run() (chars of already-redacted text),
+// independent of the MAX_CAPTURE HEAD that classification scans, so the
+// timeout dump shows where the run actually ended even when the capture
+// exceeds MAX_CAPTURE.
+const TAIL_CAPTURE = 262_144;
+const TAIL_LINES_PER_STREAM = 30;
+const TAIL_LINE_CAP = 300;
+
+/**
+ * Strip ANSI CSI sequences and C0/DEL control characters (tab kept) from one
+ * captured line so child output cannot overwrite, recolor, or spoof the CI
+ * log. A lone CR is turned into a line break by the caller's split.
+ */
+function stripControls(line) {
+	return line
+		.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
+		.replace(/[\x00-\x08\x0b-\x1f\x7f\u0080-\u009f\u2028\u2029]/g, '');
+}
+
+/** Token-shaped secret scrub for lines that reach the (public) CI log. */
+function scrubSecrets(line) {
+	return line
+		.replace(/\b(?:sk|pk|rk)-[A-Za-z0-9_-]{16,}/g, '<redacted>')
+		.replace(/\bgh[pousr]_[A-Za-z0-9]{20,}/g, '<redacted>')
+		.replace(/\bgithub_pat_[A-Za-z0-9_]{20,}/g, '<redacted>')
+		.replace(/\bnpm_[A-Za-z0-9]{20,}/g, '<redacted>')
+		.replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/gi, '$1 <redacted>')
+		.replace(
+			/\b((?:api[_-]?key|token|secret|password|authorization)["']?\s*[:=]\s*["']?)[^\s"',}]{6,}/gi,
+			'$1<redacted>',
+		);
+}
+
+function tailLines(text, count) {
+	const lines = text
+		.split(/\r\n|\r|\n/)
+		.map(stripControls)
+		.filter((ln) => ln.trim() !== '');
+	return { total: lines.length, tail: lines.slice(-count) };
+}
+
+/**
+ * PURE builder for the timeout diagnostic dump. Tails EACH stream separately
+ * (stdout and stderr are separate fd captures, so no chronological interleave
+ * exists to preserve — the header says so), strips control characters,
+ * scrubs token shapes, caps every line at TAIL_LINE_CAP, and gives every line
+ * a fixed prefix. Uses the stream tails run() preserved (the true end of a
+ * capture larger than MAX_CAPTURE) and falls back to `out`/`err`. Returns the
+ * lines to print, bounded by 2 * TAIL_LINES_PER_STREAM tail lines plus two
+ * headers.
+ */
+export function formatCaptureTail(r) {
+	const prefix = '[repro-2910-v2-host]';
+	const lines = [];
+	for (const [label, full, tailText, truncated, windowed] of [
+		['stdout', r.out ?? '', r.outTail, r.outTruncated, r.outWindowed],
+		['stderr', r.err ?? '', r.errTail, r.errTruncated, r.errWindowed],
+	]) {
+		let source = typeof tailText === 'string' ? tailText : full;
+		if (windowed) {
+			// The window is a strict suffix of the stream, so its first line
+			// may be cut mid-token (which would defeat the prefix-based
+			// scrub): drop it.
+			const nl = source.search(/\r\n|\r|\n/);
+			source = nl === -1 ? '' : source.slice(nl).replace(/^(?:\r\n|\r|\n)/, '');
+		}
+		const { total, tail } = tailLines(source, TAIL_LINES_PER_STREAM);
+		const partial = truncated || windowed;
+		const trunc = truncated
+			? `; capture exceeded ${MAX_CAPTURE} chars, showing the true end of the stream`
+			: windowed
+				? `; counted within the last ${TAIL_CAPTURE} chars only`
+				: '';
+		lines.push(
+			`${prefix} captured ${label} tail (redacted, last ${tail.length} of ${total}${partial ? '+' : ''} non-empty lines${trunc}; stdout and stderr are separate captures, not interleaved):`,
+		);
+		for (const line of tail) {
+			lines.push(
+				`${prefix}   ${label}: ${scrubSecrets(redactLogLine(redact(line))).slice(0, TAIL_LINE_CAP)}`,
+			);
+		}
+	}
+	return lines;
 }
 
 /** Best-effort child-tree kill (direct kill + Windows taskkill /T walk). */
@@ -151,17 +257,40 @@ function run(argv, { cwd, env, timeoutMs }) {
 			finished = true;
 			let out = '';
 			let err = note ?? '';
+			let outTail = '';
+			let errTail = note ?? '';
+			let outTruncated = false;
+			let errTruncated = false;
+			let outWindowed = false;
+			let errWindowed = false;
 			try {
-				out = redact(readFileSync(outPath, 'utf8')).slice(0, MAX_CAPTURE);
+				const outText = redact(readFileSync(outPath, 'utf8'));
+				out = outText.slice(0, MAX_CAPTURE);
+				outTail = outText.slice(-TAIL_CAPTURE);
+				outTruncated = outText.length > MAX_CAPTURE;
+				outWindowed = outText.length > TAIL_CAPTURE;
 				const errText = redact(readFileSync(errPath, 'utf8'));
-				err = note
-					? `${note}\n${errText}`.slice(0, MAX_CAPTURE)
-					: errText.slice(0, MAX_CAPTURE);
+				const errAll = note ? `${note}\n${errText}` : errText;
+				err = errAll.slice(0, MAX_CAPTURE);
+				errTail = errAll.slice(-TAIL_CAPTURE);
+				errTruncated = errAll.length > MAX_CAPTURE;
+				errWindowed = errAll.length > TAIL_CAPTURE;
 			} catch {
 				/* nothing written */
 			}
 			closeAndCleanup();
-			resolve({ code, out, err, timedOut: killed });
+			resolve({
+				code,
+				out,
+				err,
+				outTail,
+				errTail,
+				outTruncated,
+				errTruncated,
+				outWindowed,
+				errWindowed,
+				timedOut: killed,
+			});
 		};
 		let child;
 		try {
@@ -553,6 +682,19 @@ async function main() {
 			console.log(
 				`[repro-2910-v2-host] host run: exit=${r.code} timedOut=${r.timedOut} captured=${full.length} bytes`,
 			);
+			if (runTimedOut) {
+				// 2026-11-26 (#3921 merge-queue kick-outs, two in a row): a
+				// timed-out host run printed only the SELECTED evidence lines,
+				// hiding where the run actually hung — the fd-backed capture is
+				// the only forensic artifact and the scratch dir is deleted
+				// right after. Dump a bounded, redacted, control-stripped tail of
+				// EACH stream (formatCaptureTail) so the next timeout is
+				// diagnosable from the job log alone (the assertions themselves
+				// had already passed when the queue kicked these runs out).
+				for (const line of formatCaptureTail(r)) {
+					console.log(line);
+				}
+			}
 
 			// (e) AUTH-FREE evidence.
 			const loadingShimLines = full
