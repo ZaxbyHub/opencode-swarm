@@ -3158,23 +3158,6 @@ export function checkExplicitInvalidation(
 
 export const EVIDENCE_WRITE_BLIND_SPOTS: readonly EvidenceWriteBlindSpot[] = [
 	{
-		file: 'src/maintenance/communication-log.ts',
-		rule: 'W',
-		target: 'file',
-		status: 'not-an-evidence-artifact',
-		reason:
-			'The communication debug-log lifecycle maintenance writes ' +
-			'.swarm/swarm_communication_debug.md — a curated prose log, never a ' +
-			'cached evidence artifact — through the module\u2019s `_internals` ' +
-			'test seam (the repo\u2019s DI convention for injectable fs surfaces), ' +
-			'which is why the pattern engine cannot fold the target. The file is ' +
-			'classed as evidence-adjacent only because the same module READS task ' +
-			'evidence (`readTaskEvidence`) for the durable-closure check that ' +
-			'decides auto-pruning. The two writes are the prune splice and the ' +
-			'audited AI release, both full-file rewrites of the log that no cache ' +
-			'ever reads; every removal is audited to events.jsonl.',
-	},
-	{
 		file: 'src/background/pr-feedback-loop.ts',
 		rule: 'W',
 		target: 'path.join(directory, receipt.path)',
