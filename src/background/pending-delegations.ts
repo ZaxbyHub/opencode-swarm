@@ -492,6 +492,25 @@ export const TERMINAL_CLOSEOUT_STEPS = [
 	 * shared recorder.
 	 */
 	'plan_critic_approval',
+	/**
+	 * Layer 23 (the 2026-11-27 consumer 3.8 evening wedge): the durable
+	 * terminal-result INGESTION is its own recoverable closeout step. A coder
+	 * or gate-bearing round whose ingestion apply/commit failed once used to
+	 * sit in `ingestion_error`/retryable with every closeout step completed —
+	 * no pending step, so the r13 re-drive machinery never fired — until the
+	 * stale sweep flipped the record and OVERWROTE the trusted terminal
+	 * (claimDelegationIngestion then refuses 'not_ready' forever: it requires
+	 * terminalResult.status === 'completed'). The round's result was stranded
+	 * with a pending advisory and no in-band completion, the settlement WAL
+	 * window blocked re-dispatches, and the only exit was out-of-band salvage
+	 * plus a human /swarm recover. The step is required exactly for the
+	 * ingestion-claim set (coder or gate-bearing, completed terminal); it is
+	 * acked only when the ingestion commits durably (consumed — success or a
+	 * terminal-negative outcome), and stays pending otherwise so every
+	 * maintenance pass replays the trusted terminal and re-drives the
+	 * ingestion.
+	 */
+	'ingestion_commit',
 ] as const;
 
 export type TerminalCloseoutStep = (typeof TERMINAL_CLOSEOUT_STEPS)[number];
@@ -5578,7 +5597,9 @@ function getTerminalCloseoutReconciler(
  * trusted terminal but no journal yet — the crash-between-claim-and-initialize
  * shape, and every pre-repair legacy record). r14 (P0-2): a step durably
  * marked `failed` is terminally closed — it does not keep the record in the
- * recovery set.
+ * recovery set. Layer 23: a completed-terminal record with a live/recoverable
+ * ingestion (claimed/retryable, never durably consumed) also stays in the set
+ * even when its journal predates the ingestion_commit step.
  */
 export function hasPendingTerminalCloseout(
 	record: BackgroundDelegationRecord,
@@ -5589,7 +5610,42 @@ export function hasPendingTerminalCloseout(
 	const closeout = record.closeout;
 	if (!closeout) return true;
 	if (closeout.terminalEventId !== terminal.eventId) return true;
-	return Object.values(closeout.steps).some((step) => step.state === 'pending');
+	// Layer 23: a pending ingestion_commit step can only make progress on a
+	// completed terminal — claimDelegationIngestion refuses every other
+	// terminal status forever. When the terminal was legitimately flipped
+	// (Stage-B freshness transition, authorized operator force-stale), the
+	// step drops out of the recovery set instead of re-driving a record that
+	// can never commit its ingestion.
+	const hasProgressablePendingStep = Object.entries(closeout.steps).some(
+		([stepName, step]) =>
+			step.state === 'pending' &&
+			!(stepName === 'ingestion_commit' && terminal.status !== 'completed'),
+	);
+	if (hasProgressablePendingStep) return true;
+	// Layer 23 (the 2026-11-27 consumer 3.8 evening wedge): a record whose
+	// durable terminal-result ingestion has NOT committed must stay in the
+	// recovery set even when every journaled step is already completed — the
+	// journal can predate the ingestion_commit step (initialized before that
+	// step existed, ingestion apply failed afterwards). `record.ingestion` is
+	// written exclusively by the ingestion claim/commit path (coder or
+	// gate-bearing rounds), so its presence plus a non-consumed state proves
+	// membership in the ingestion-claim set WITHOUT importing the role
+	// predicate (stage-b-gates imports this module — a reverse import would
+	// cycle). The re-drive upserts the missing step (initializeTerminalCloseout)
+	// and acks it only on a durable consumed commit, so a completed step plus
+	// consumed ingestion drops out of the recovery set. A step durably marked
+	// `failed` (r14 P0-2: terminally closed with a visible reason) also drops
+	// out — an authorized give-up must not re-drive forever.
+	if (
+		terminal.status === 'completed' &&
+		record.ingestion !== undefined &&
+		record.ingestion.state !== 'consumed' &&
+		(closeout.steps.ingestion_commit?.state === undefined ||
+			closeout.steps.ingestion_commit?.state === 'pending')
+	) {
+		return true;
+	}
+	return false;
 }
 
 /**
@@ -6210,7 +6266,32 @@ export async function initializeTerminalCloseout(
 				if (current.closeout) {
 					// Same terminal: keep existing step states (a re-drive must not
 					// reset completed steps). Different terminal: refuse.
-					ok = current.closeout.terminalEventId === terminalEventId;
+					if (current.closeout.terminalEventId !== terminalEventId) return;
+					// Layer 23 upsert: a same-terminal replay ADDS required steps the
+					// journal predates (e.g. ingestion_commit on records whose journal
+					// was initialized before that step existed) as pending while
+					// preserving every existing step state. Without the upsert a
+					// legacy journal could never grow the step, and recovery could
+					// never ack the ingestion commit it just re-drove.
+					const missingSteps = requiredSteps.filter(
+						(step) => current.closeout?.steps[step] === undefined,
+					);
+					if (missingSteps.length > 0) {
+						const upsertedSteps: BackgroundDelegationCloseout['steps'] = {
+							...current.closeout.steps,
+						};
+						for (const step of missingSteps) {
+							upsertedSteps[step] = { state: 'pending', updatedAt: now };
+						}
+						appendRecord(directory, {
+							...current,
+							closeout: {
+								...current.closeout,
+								steps: upsertedSteps,
+							},
+						});
+					}
+					ok = true;
 					return;
 				}
 				const steps: BackgroundDelegationCloseout['steps'] = {};
@@ -7255,6 +7336,29 @@ function sweepStaleLocked(
 		}
 		if (excludeCorrelationIds?.has(record.correlationId)) continue;
 		if (!statuses.has(record.status)) continue;
+		// Layer 23 (the 3.8 evening wedge): a record whose ingestion is live
+		// or recoverable is OWNED by the ingestion state machine — the r13
+		// closeout re-drive replays its trusted terminal every maintenance
+		// pass until the ingestion commits. Sweeping it would overwrite the
+		// trusted terminal with the liveness-stale terminal, and
+		// claimDelegationIngestion refuses a non-'completed' terminalResult
+		// forever — dead-ending the recovery the journal just promised. The
+		// historical assumption below ("ingestion_error cannot carry a
+		// terminalResult") is wrong for exactly this class: the failed commit
+		// keeps the trusted terminal.
+		//
+		// #2971 scoping: this immunity belongs to the AUTOMATIC liveness sweep
+		// only. An authorized operator finalization (failureClass/reasonPrefix
+		// overrides, e.g. /swarm abort-pr-workflow) may still deliberately
+		// terminalize a record whose ingestion will never be re-driven.
+		if (
+			limits.failureClass === undefined &&
+			limits.reasonPrefix === undefined &&
+			(record.ingestion?.state === 'claimed' ||
+				record.ingestion?.state === 'retryable')
+		) {
+			continue;
+		}
 		if (now - record.updatedAt <= timeoutMs) continue;
 		// 2026-11-26 (task 2.15 liveness wedge): the store's `updatedAt` only
 		// proves the absence of STORE writes — a live child running a long
@@ -7300,9 +7404,12 @@ function sweepStaleLocked(
 		// with the disposition — same event shape the claim path produces
 		// (shared builder, fold-monotonic clamp, schemaVersion floor) — so a
 		// swept lane is never liveness-terminal without its typed result. The
-		// sweep only visits pending/running/ingestion_error records, none of
-		// which can carry a terminalResult yet (the claim writes status and
-		// event atomically), so this can never overwrite a typed event.
+		// sweep only visits pending/running/ingestion_error records. Pending
+		// and running carry no terminalResult yet (the claim writes status and
+		// event atomically); an ingestion_error record DOES keep its trusted
+		// terminal, but the Layer 23 guard above already skipped every record
+		// with a live/recoverable ingestion, so this can never overwrite a
+		// typed event that the ingestion recovery still needs.
 		const staleTerminal = buildTypedDelegationTerminal(
 			record,
 			'stale',

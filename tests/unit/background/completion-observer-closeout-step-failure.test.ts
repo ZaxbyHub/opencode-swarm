@@ -133,9 +133,31 @@ describe('terminal closeout journal — permanent failure state (r14 P0-2 store 
 		expect(
 			isTerminalCloseoutStepPending(failed!, eventId, 'sounding_board'),
 		).toBe(false);
-		// A failed step no longer keeps the record in the recovery set (the
-		// other steps are all completed here).
-		expect(hasPendingTerminalCloseout(failed!)).toBe(false);
+		// Layer 23: this fixture's reviewer ingestion apply failed (no
+		// reviewer receipts), so the record sits in the exact 3.8 evening
+		// wedge shape — a recoverable (non-consumed) ingestion KEEPS it in
+		// the recovery set even though every other journaled step is
+		// completed or failed. Pre-Layer-23 this returned false and the
+		// wedge was unrecoverable in-band.
+		expect(failed?.closeout?.steps.ingestion_commit?.state).toBe('pending');
+		expect(hasPendingTerminalCloseout(failed!)).toBe(true);
+		// r14 failed-step semantics still hold: once the ingestion step is
+		// ALSO terminally closed with a visible reason, no progressable
+		// pending step remains and the record leaves the recovery set.
+		expect(
+			await markTerminalCloseoutStepFailed(
+				directory,
+				'ses_p2_store',
+				eventId,
+				'ingestion_commit',
+				'fixture: reviewer ingestion permanently refused',
+			),
+		).toBe(true);
+		const closedIngestion = findByCorrelationId(directory, 'ses_p2_store');
+		expect(closedIngestion?.closeout?.steps.ingestion_commit?.state).toBe(
+			'failed',
+		);
+		expect(hasPendingTerminalCloseout(closedIngestion!)).toBe(false);
 		// Idempotent re-mark.
 		expect(
 			await markTerminalCloseoutStepFailed(
