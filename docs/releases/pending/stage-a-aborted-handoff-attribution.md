@@ -1,0 +1,20 @@
+# `fix(swarm)`: a green pre_check_batch self-heals the ABORTED background-handoff Stage A wedge
+
+## Summary
+
+- A background coder delegation's foreground settlement WAL is `ABORTED` ("ownership transferred to durable background completion" — the normal handoff), the background round records its `accepted_mutation` (last workflow transition `background-coder:…`), and the task sits at `coder_delegated` with no `pre_check` gate proof. When the child session ends through the 45-minute session breaker (NEED-handoff) and the architect completes the remaining work itself, the subsequent green `pre_check_batch` could not attribute: the durable gate-task fallback (`resolveDurableGateTaskId`) only considered `DISPATCHED`/`PREPARED`/`COMMITTED` WAL states, and its exact-path binding rejected directory-valued declared scopes (`tools/native_reference` vs `tools/native_reference/imported_profile.py`). The green pass dead-ended as `no_task_correlation` — with an advisory whose only remediation, `/swarm recover`, is human-only, so every occurrence wedged the loop until the user intervened (observed on task 2.17, 2026-11-26).
+- Fix, two surfaces: (1) the durable fallback now treats an `ABORTED` handoff WAL as an eligible candidate when the task's own evidence proves the live wedge — state `coder_delegated`, last outcome `accepted_mutation`, last transition from a `background-coder:` settlement, and no recorded `pre_check` proof; the WAL only supplies the declared scope for binding, the evidence is the authority for the state. (2) The eligible binding is directory-aware through the existing `scopeSetContainsFile` predicate (a declared directory covers everything beneath it — the same predicate as the write-scope gate), so a directory-scoped round's green gate run binds instead of falling out as `files_mismatch`. The Stage A self-report's normal mechanical write then records `stage_a_passed` in the very gate run — the same self-healing contract as the mis-settled-completion reconciliation arm — no fresh coder round, no human `/swarm recover`.
+- Fail-closed controls preserved: a handoff without an accepted mutation (nothing earned Stage A), a non-background `accepted_mutation`, ambiguous candidate cardinality, and caller files outside the declared scope all stay unattributed and keep the existing advisory + human remediation.
+
+## User-facing changes
+
+- A task whose background coder round was interrupted by the session breaker no longer stalls the loop at Stage A when the architect finishes and verifies the work: the next green `pre_check_batch` (including one issued through Code Mode on hosts where nested tool hooks no longer fire) records Stage A directly, and reviewer/test-engineer dispatches proceed without `TASK_WORKFLOW_STAGE_A_REQUIRED`.
+- Directory-valued `declare_scope` scopes now bind their green gate runs on the durable attribution path, closing the same blind spot the write-scope gate never had.
+
+## Migration notes
+
+No migration: the change is a read-path attribution predicate plus its binding; no on-disk artifact changes. Existing wedged tasks (the shape above) heal on their next green `pre_check_batch`; tasks whose rounds produced no mutation keep requiring `/swarm recover`.
+
+## Discovery context
+
+Found in the Wirtschaftssimulation loop (session `ses_df579ab2effeEakhRf3WX0khP9`, task 2.17, 2026-11-26 23:40Z): the coder child ended via the 45-minute breaker with a NEED-handoff, the architect ran all four regression suites itself (13/16/6/21 passed), committed `c46b597`, and `pre_check_batch` returned `gates_passed: true` — but the stage-a self-report routed `no_task_correlation` (no session task correlation, no durable candidate), `recover_stage_a_task` refused (evidence at `coder_delegated`, not idle/blocked), and `/swarm recover` is human-only, so the architect correctly escalated to the user. Pinned by `tests/unit/tools/stage-a-self-report-aborted-handoff.test.ts`: the healing write, the no-mutation control, the non-background-transition control, ambiguity fail-closed, out-of-scope fail-closed, and the COMMITTED directory-scope binding.

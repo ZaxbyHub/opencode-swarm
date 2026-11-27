@@ -11,6 +11,7 @@ import * as fsSync from 'node:fs';
 import * as path from 'node:path';
 
 import { getSwarmAgents, resolveFallbackModel } from '../../agents/index';
+import { scopeSetContainsFile } from '../../background/stage-b-gates';
 import { WRITE_TOOL_NAMES } from '../../config/constants';
 import {
 	type AuthorityConfig,
@@ -340,6 +341,35 @@ async function resolveDurableGateTaskId(
 				}
 				continue;
 			}
+			if (state.state === 'ABORTED') {
+				// 2026-11-26 swarm_communication_debug (task 2.17): the
+				// foreground settlement handed ownership to the durable
+				// background completion ("ownership transferred to durable
+				// background completion"), the background coder round then
+				// recorded its accepted mutation, and the task sat at
+				// coder_delegated awaiting a Stage A pass the pre_check
+				// self-report could not attribute — the only WAL carrying the
+				// declared scope is ABORTED, invisible to the COMMITTED arm
+				// below. The evidence is the authority for the state; the WAL
+				// only supplies the scope for binding. Eligibility demands
+				// the full live-wedge proof: coder_delegated, a LAST
+				// background accepted_mutation transition, and no recorded
+				// pre_check gate proof — a round that aborted without a
+				// mutation stays unattributed (its Stage A would be unearned)
+				// and keeps the human /swarm recover remediation.
+				const evidence = await readTaskEvidence(directory, state.taskId);
+				const workflow = getTaskWorkflowSnapshot(evidence);
+				if (
+					workflow.state === 'coder_delegated' &&
+					workflow.lastOutcome === 'accepted_mutation' &&
+					typeof workflow.lastTransitionId === 'string' &&
+					workflow.lastTransitionId.startsWith('background-coder:') &&
+					evidence?.gates?.pre_check === undefined
+				) {
+					eligible.push(state);
+				}
+				continue;
+			}
 			if (state.state !== 'COMMITTED') continue;
 			const workflow = getTaskWorkflowSnapshot(
 				await readTaskEvidence(directory, state.taskId),
@@ -391,8 +421,18 @@ async function resolveDurableGateTaskId(
 				// Exclude empty-string entries: an empty path is never a real
 				// file scope, and treating '' === '' as a match would bind on
 				// a shared "no scope declared" placeholder rather than a
-				// genuine file-scope intersection.
-				declared.some((f) => f !== '' && normalizedCallerFiles.includes(f));
+				// genuine file-scope intersection. Directory-valued declared
+				// entries bind through scopeSetContainsFile — a declared
+				// directory covers everything beneath it, the same predicate
+				// as the write-scope gate; exact-path-only matching made every
+				// directory-scoped background round's green pre_check fall
+				// out as files_mismatch (the 2026-11-26 2.17 wedge shape).
+				(() => {
+					const declaredSet = new Set(declared.filter((f) => f !== ''));
+					return normalizedCallerFiles.some((f) =>
+						scopeSetContainsFile(declaredSet, f),
+					);
+				})();
 			if (bound) return { taskId: candidate.taskId };
 			return { unbound: candidate.taskId, reason: 'files_mismatch' };
 		}
