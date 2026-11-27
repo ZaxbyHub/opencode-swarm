@@ -128,6 +128,10 @@ interface ComputedChanges {
 	isClosed: boolean;
 	/** New review decision to record (empty string if no change). */
 	newReviewDecision: string;
+	/** Terminal PR state observed this cycle, or null while the PR is open.
+	 *  applyChanges() owns the lastTerminalStateMap latch (computeChanges
+	 *  stays side-effect free). */
+	terminalState: 'MERGED' | 'CLOSED' | null;
 }
 
 // ── Meaningful snapshot fields for idle-backoff reset (FR-008) ──────
@@ -201,6 +205,17 @@ export class PrMonitorWorker {
 
 	/** In-memory review decision per PR correlationId (not persisted). */
 	private readonly reviewStateMap = new Map<string, string>();
+
+	/** In-memory record of the terminal state ('MERGED' | 'CLOSED') for which
+	 *  pr.merged/pr.closed was already emitted, per PR correlationId (not
+	 *  persisted). It dedupes the EVENT only: isMerged/isClosed (and therefore
+	 *  the sweep key and the auto-unsubscribe retry) are still derived from the
+	 *  live PR state every cycle, so a refused store write or a timed-out cycle
+	 *  keeps retrying cleanup without re-emitting. The latch is written in
+	 *  applyChanges() after the event was emitted, cleared when the PR is seen
+	 *  non-terminal again (reopen), after a successful auto-unsubscribe, and in
+	 *  stop(). A single re-emit after a worker restart is acceptable. */
+	private readonly lastTerminalStateMap = new Map<string, string>();
 
 	/** Accumulates merged/closed PR keys during the current poll cycle for sweep cleanup. */
 	private mergedOrClosedKeys: Set<string> = new Set();
@@ -292,6 +307,7 @@ export class PrMonitorWorker {
 		this.status = 'stopped';
 		this.circuitBreakerMap.clear();
 		this.reviewStateMap.clear();
+		this.lastTerminalStateMap.clear();
 		this.idlePollCountMap.clear();
 		this.pollCycleCount = 0;
 		log('[PrMonitorWorker] Stopped');
@@ -967,33 +983,44 @@ export class PrMonitorWorker {
 			newReviewDecision = current.review.reviewDecision;
 		}
 
-		// ── PR merged ──
+		// ── PR merged / closed ──
+		// isMerged/isClosed track the live state every cycle so the
+		// sweep key and auto-unsubscribe keep retrying while the PR lingers
+		// (e.g. the store refused the earlier cleanup). Only the EVENT is
+		// deduped, via the read-only lastTerminalStateMap latch that
+		// applyChanges() writes once the event has been emitted.
+		let terminalState: 'MERGED' | 'CLOSED' | null = null;
 		if (current.status.state === 'MERGED') {
+			terminalState = 'MERGED';
 			isMerged = true;
-			events.push({
-				type: 'pr.merged',
-				payload: {
-					prNumber: sub.prNumber,
-					repoFullName: sub.repoFullName,
-					prUrl: sub.prUrl,
-					headRefOid: current.status.headRefOid,
-				},
-			});
+			if (this.lastTerminalStateMap.get(sub.correlationId) !== 'MERGED') {
+				events.push({
+					type: 'pr.merged',
+					payload: {
+						prNumber: sub.prNumber,
+						repoFullName: sub.repoFullName,
+						prUrl: sub.prUrl,
+						headRefOid: current.status.headRefOid,
+					},
+				});
+			}
 			snapshotUpdates.isWatching = false;
 		}
 
-		// ── PR closed ──
 		if (current.status.state === 'CLOSED') {
+			terminalState = 'CLOSED';
 			isClosed = true;
-			events.push({
-				type: 'pr.closed',
-				payload: {
-					prNumber: sub.prNumber,
-					repoFullName: sub.repoFullName,
-					prUrl: sub.prUrl,
-					headRefOid: current.status.headRefOid,
-				},
-			});
+			if (this.lastTerminalStateMap.get(sub.correlationId) !== 'CLOSED') {
+				events.push({
+					type: 'pr.closed',
+					payload: {
+						prNumber: sub.prNumber,
+						repoFullName: sub.repoFullName,
+						prUrl: sub.prUrl,
+						headRefOid: current.status.headRefOid,
+					},
+				});
+			}
 			snapshotUpdates.isWatching = false;
 		}
 
@@ -1001,7 +1028,14 @@ export class PrMonitorWorker {
 		// subscriptions that have pending events from being swept.
 		snapshotUpdates.hasUnaddressedEvents = events.length > 0;
 
-		return { events, snapshotUpdates, isMerged, isClosed, newReviewDecision };
+		return {
+			events,
+			snapshotUpdates,
+			isMerged,
+			isClosed,
+			newReviewDecision,
+			terminalState,
+		};
 	}
 
 	/**
@@ -1097,6 +1131,20 @@ export class PrMonitorWorker {
 			await this.emitEvent(type, payload);
 		}
 
+		// Maintain the terminal-event latch right after emission (before the
+		// timeout re-check) so a timed-out cycle cannot re-emit, while cleanup
+		// (sweep key / auto-unsubscribe) is still retried next cycle.
+		if (changes.terminalState === null) {
+			// PR is open (again): a later close/merge must emit afresh.
+			this.lastTerminalStateMap.delete(sub.correlationId);
+		} else if (
+			changes.events.some(
+				(e) => e.type === 'pr.merged' || e.type === 'pr.closed',
+			)
+		) {
+			this.lastTerminalStateMap.set(sub.correlationId, changes.terminalState);
+		}
+
 		// Re-check after event emission — timeout may have fired during awaits
 		if (isTimedOut?.()) {
 			log(
@@ -1125,6 +1173,7 @@ export class PrMonitorWorker {
 		if (changes.isMerged && this.config.auto_unsubscribe_on_merge) {
 			await _internals.unsubscribe(this.directory, sub.correlationId);
 			this.reviewStateMap.delete(sub.correlationId);
+			this.lastTerminalStateMap.delete(sub.correlationId);
 			this.circuitBreakerMap.delete(sub.correlationId);
 			log('[PrMonitorWorker] Auto-unsubscribed merged PR', {
 				correlationId: sub.correlationId,
@@ -1136,6 +1185,7 @@ export class PrMonitorWorker {
 		if (changes.isClosed && this.config.auto_unsubscribe_on_close) {
 			await _internals.unsubscribe(this.directory, sub.correlationId);
 			this.reviewStateMap.delete(sub.correlationId);
+			this.lastTerminalStateMap.delete(sub.correlationId);
 			this.circuitBreakerMap.delete(sub.correlationId);
 			log('[PrMonitorWorker] Auto-unsubscribed closed PR', {
 				correlationId: sub.correlationId,

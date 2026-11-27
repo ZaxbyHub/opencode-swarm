@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { mkdir, readFile, unlink } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
 	appendCoreEventSync,
 	hasSpecDriftAuditEvent,
@@ -69,6 +70,7 @@ const SPEC_DRIFT_RECOVERY_AGENT = 'spec-drift-recovery';
 export const _internals: {
 	appendEvent: typeof appendEvent;
 	assertProjectRoot: typeof assertProjectRoot;
+	buildUnusedTransitionId: typeof buildUnusedTransitionId;
 	bunWrite: typeof bunWrite;
 	invalidateCachedArtifact: typeof invalidateCachedArtifact;
 	loadPlanJsonOnly: typeof loadPlanJsonOnly;
@@ -90,6 +92,7 @@ export const _internals: {
 } = {
 	appendEvent,
 	assertProjectRoot,
+	buildUnusedTransitionId,
 	bunWrite,
 	invalidateCachedArtifact,
 	loadPlanJsonOnly,
@@ -187,6 +190,32 @@ function parseWal(raw: string): SpecDriftRecoveryWal | null {
 	}
 }
 
+/** Synchronous WAL state for structural mutation gates. Corrupt/unreadable fails closed. */
+export function inspectSpecDriftRecoveryWalSync(
+	directory: string,
+): 'missing' | RecoveryState | 'corrupt' {
+	const walPath = join(directory, '.swarm', 'spec-drift-recovery.json');
+	let raw: string;
+	try {
+		raw = readFileSync(walPath, 'utf-8');
+	} catch (error) {
+		return (error as NodeJS.ErrnoException)?.code === 'ENOENT'
+			? 'missing'
+			: 'corrupt';
+	}
+	const wal = parseWal(raw);
+	// Same captured-content check the recovery run applies (F-002): a structurally
+	// valid WAL whose content no longer matches newHash is corrupt, not COMMITTED.
+	if (!wal || !capturedContentConsistent(wal)) return 'corrupt';
+	return wal.state;
+}
+
+/** Captured spec content must be present exactly when newHash is, and must hash to it. */
+function capturedContentConsistent(wal: SpecDriftRecoveryWal): boolean {
+	if ((wal.newHash === null) !== (wal.specContent === null)) return false;
+	return wal.specContent === null || sha256(wal.specContent) === wal.newHash;
+}
+
 async function readFileText(filePath: string): Promise<string | null> {
 	try {
 		return await readFile(filePath, 'utf-8');
@@ -242,22 +271,27 @@ async function verifySnapshot(
 	}
 }
 
+async function hasSnapshotEvent(
+	directory: string,
+	transitionId: string,
+): Promise<boolean> {
+	const events = await _internals.readLedgerEvents(directory);
+	return events.some((event) => {
+		const payload = event.payload as Record<string, unknown> | undefined;
+		const approval = payload?.approval as Record<string, unknown> | undefined;
+		return (
+			event.event_type === 'snapshot' &&
+			approval?.specDriftTransitionId === transitionId
+		);
+	});
+}
+
 async function ensureSnapshotEvent(
 	directory: string,
 	plan: NonNullable<Awaited<ReturnType<typeof loadPlanJsonOnly>>>,
 	transitionId: string,
 ): Promise<void> {
-	const events = await _internals.readLedgerEvents(directory);
-	for (const event of events) {
-		const payload = event.payload as Record<string, unknown> | undefined;
-		const approval = payload?.approval as Record<string, unknown> | undefined;
-		if (
-			event.event_type === 'snapshot' &&
-			approval?.specDriftTransitionId === transitionId
-		) {
-			return;
-		}
-	}
+	if (await hasSnapshotEvent(directory, transitionId)) return;
 
 	await _internals.takeSnapshotEvent(directory, plan, {
 		source: 'spec_drift_recovery',
@@ -316,6 +350,59 @@ function buildTransitionId(
 	);
 }
 
+/**
+ * A newly initiated repair must not reuse any completed repair's audit
+ * identity, even when an A→B drift state recurs after an intervening
+ * transaction. The ledger is read ONCE: its length supplies a deterministic
+ * epoch and its snapshot IDs supply the collision set. Candidate search is
+ * bounded by the number of existing snapshot IDs, not a lifetime cap, and
+ * audit-presence checks use the authority index rather than rescanning the
+ * ledger. Before the PREPARED WAL write a crash-retry sees the same history
+ * and chooses the same candidate; after the write the PREPARED replay keeps
+ * that identity without another search.
+ */
+async function buildUnusedTransitionId(
+	directory: string,
+	mode: RecoveryMode,
+	baseTransitionId: string,
+): Promise<string> {
+	const events = await _internals.readLedgerEvents(directory);
+	const snapshotIds = new Set<string>();
+	for (const event of events) {
+		const payload = event.payload as Record<string, unknown> | undefined;
+		const approval = payload?.approval as Record<string, unknown> | undefined;
+		if (
+			event.event_type === 'snapshot' &&
+			typeof approval?.specDriftTransitionId === 'string'
+		) {
+			snapshotIds.add(approval.specDriftTransitionId);
+		}
+	}
+	const eventType =
+		mode === 'acknowledge' ? 'spec_drift_acknowledged' : 'spec_drift_repaired';
+	const epochBase = sha256(`${baseTransitionId}:ledger:${events.length}`);
+	let auditCollisions = 0;
+	for (
+		let collision = 0;
+		collision <= snapshotIds.size + auditCollisions;
+		collision++
+	) {
+		const candidate =
+			collision === 0
+				? epochBase
+				: sha256(`${epochBase}:recovery:${collision}`);
+		if (snapshotIds.has(candidate)) continue;
+		if (await _internals.verifyEventPresence(directory, eventType, candidate)) {
+			auditCollisions++;
+			continue;
+		}
+		return candidate;
+	}
+	throw new Error(
+		'Spec drift recovery could not allocate a fresh audit identity',
+	);
+}
+
 function buildCorruptMarkerResult(mode: RecoveryMode): SpecDriftRecoveryResult {
 	return {
 		status: 'corrupt_marker',
@@ -369,6 +456,18 @@ export async function reconcileSpecDrift(
 		actor: RecoveryActor;
 		/** Caller already holds the spec.md lock across the canonical spec write. */
 		specLockAlreadyHeld?: boolean;
+		/**
+		 * Canonical spec_write only: reconcile the plan's specHash even when the
+		 * drift marker has not materialized yet. The marker is written lazily by
+		 * the next loadPlan — which runs AFTER the spec write — so without this
+		 * path the FIRST canonical spec change always leaves plan.json at the
+		 * old hash, the subsequent loadPlan writes the marker, and every
+		 * plan-mutating tool wedges with SPEC_DRIFT_BLOCK (the marker-exists
+		 * repair could only clear it via a second spec_write nobody asks for).
+		 * With this flag the canonical write synthesizes the drift state from
+		 * the plan itself and runs the same audited repair transaction.
+		 */
+		reconcilePlanHashWithoutMarker?: boolean;
 	},
 ): Promise<SpecDriftRecoveryResult> {
 	_internals.assertProjectRoot(directory);
@@ -387,7 +486,7 @@ export async function reconcileSpecDrift(
 	);
 
 	const markerMaybe = await _internals.readFileText(markerPath);
-	if (markerMaybe === null) {
+	if (markerMaybe === null && !options.reconcilePlanHashWithoutMarker) {
 		return {
 			status: 'no_marker',
 			mode: options.mode,
@@ -449,36 +548,180 @@ export async function reconcileSpecDrift(
 	try {
 		try {
 			const authoritativeMarkerRaw = await _internals.readFileText(markerPath);
-			if (authoritativeMarkerRaw === null) {
-				return {
-					status: 'no_marker',
-					mode: options.mode,
-					message: 'No spec drift detected.',
-				};
-			}
-
-			const marker = _internals.parseMarker(authoritativeMarkerRaw);
-			if (!marker) {
-				return buildCorruptMarkerResult(options.mode);
-			}
-			errorMarker = marker;
-
-			const markerHash = sha256(authoritativeMarkerRaw);
+			// F-001 (closeout): the recovery WAL is read BEFORE the markerless
+			// matching-hash shortcut below. A crash after the plan rebind
+			// persisted but before the ledger snapshot / audit event / WAL
+			// COMMITTED legs ran leaves plan.json already at the captured hash
+			// with the WAL still PREPARED — shortcutting there reported no work
+			// and stranded the incomplete transaction forever.
 			const existingWalRaw = await _internals.readFileText(walPath);
 			const existingWal =
 				existingWalRaw === null ? null : _internals.parseWal(existingWalRaw);
+			// F-001 (stage B round 2): validate the WAL before the markerless
+			// matching-hash shortcut below — parseWal maps a corrupt WAL to
+			// null, so gating that shortcut on `existingWal?.state !==
+			// 'PREPARED'` alone would hide a present corrupt WAL behind a
+			// no_marker instead of failing closed. A no-WAL or COMMITTED-WAL
+			// run passes this check and keeps its genuine no-op behavior.
 			if (existingWalRaw !== null && !existingWal) {
 				return {
 					status: 'failed',
 					mode: options.mode,
 					message:
 						'Spec drift recovery WAL is corrupt. Repair .swarm/spec-drift-recovery.json and retry.',
-					phase: marker.phase,
-					planTitle: marker.planTitle,
 				};
 			}
+			if (existingWal) {
+				// F-001 (stage B round 3): validate captured-content integrity
+				// BEFORE any markerless shortcut, for PREPARED and COMMITTED
+				// WALs alike. parseWal accepts a structurally valid WAL whose
+				// captured specContent no longer hashes to its newHash; such a
+				// COMMITTED WAL used to slip past the matching-hash shortcut's
+				// `state !== 'PREPARED'` gate and return no_marker before the
+				// transaction integrity check further down ever ran. The
+				// PREPARED replay already failed this check via the transaction
+				// path; hoisting it closes the shortcut hole. The integrity
+				// check on the selected transaction WAL further down remains —
+				// it also covers a freshly proposed WAL. The mutation gate applies
+				// the same helper (inspectSpecDriftRecoveryWalSync).
+				if (!capturedContentConsistent(existingWal)) {
+					return {
+						status: 'failed',
+						mode: options.mode,
+						message: `Spec drift recovery WAL ${existingWal.transitionId} has inconsistent captured spec content`,
+					};
+				}
+			}
+			let marker: SpecStalenessMarker | null = null;
+			let markerHash: string;
+			let markerSynthesized = false;
+			if (authoritativeMarkerRaw === null) {
+				// Pre-marker window (canonical spec_write only): the drift marker
+				// materializes lazily on the next loadPlan, which runs AFTER this
+				// spec write. Synthesize the drift state from the plan itself so
+				// the canonical write reconciles the plan hash now, through the
+				// same audited repair transaction, instead of letting the marker
+				// wedge save_plan later. Without a plan, without a stored
+				// specHash, or with an already-consistent hash there is nothing
+				// to reconcile — behave exactly like the no-marker case.
+				if (!options.reconcilePlanHashWithoutMarker) {
+					return {
+						status: 'no_marker',
+						mode: options.mode,
+						message: 'No spec drift detected.',
+					};
+				}
+				const planNow = await _internals.loadPlanJsonOnly(directory);
+				const specNow = _internals.readEffectiveSpecSync(directory);
+				if (specNow === null) {
+					return {
+						status: 'failed',
+						mode: options.mode,
+						message:
+							'Spec drift recovery failed: the canonical spec is missing, unreadable, or exceeds the native reader limit after spec_write. No no-marker shortcut is safe.',
+						phase: planNow?.current_phase ?? 1,
+						planTitle: planNow?.title,
+						previousHash: planNow?.specHash ?? null,
+						newHash: null,
+						transitionId: existingWal?.transitionId,
+					};
+				}
+				const planHashNow = planNow?.specHash ?? null;
+				if (!planNow || planHashNow === null) {
+					// F-001 (stage B round 4): a pending PREPARED transaction must
+					// not be reported as no work when the plan or its stored
+					// specHash is missing — the plan was lost or downgraded after
+					// the transaction was prepared, and the replay's fail-closed
+					// plan checks further down would never run behind this
+					// shortcut. Fail closed with the pending transition context
+					// (the WAL content is already integrity-validated above); a
+					// run with NO prepared WAL stays a genuine no-op.
+					if (existingWal?.state === 'PREPARED') {
+						return {
+							status: 'failed',
+							mode: options.mode,
+							message: !planNow
+								? 'Spec drift recovery is incomplete: a prepared recovery WAL is pending but plan.json is missing or unreadable. Restore the plan and retry; drift remains blocking.'
+								: 'Spec drift recovery is incomplete: a prepared recovery WAL is pending but plan.json has no stored specHash to reconcile. Drift remains blocking.',
+							phase: existingWal.phase,
+							planTitle: existingWal.planTitle,
+							previousHash: existingWal.previousHash,
+							newHash: existingWal.newHash,
+							transitionId: existingWal.transitionId,
+						};
+					}
+					return {
+						status: 'no_marker',
+						mode: options.mode,
+						message: 'No spec drift detected.',
+					};
+				}
+				if (
+					planHashNow === (specNow?.hash ?? null) &&
+					existingWal?.state !== 'PREPARED'
+				) {
+					// F-001 (closeout): already-consistent plan and no pending
+					// transaction is a genuine no-op. With a PREPARED WAL present
+					// the "consistent" plan is the crashed transaction's own
+					// rebind — fall through so the idempotent replay finishes the
+					// pending snapshot/audit/COMMITTED legs instead of reporting
+					// no work.
+					return {
+						status: 'no_marker',
+						mode: options.mode,
+						message: 'No spec drift detected.',
+					};
+				}
+				marker = {
+					planTitle: planNow.title,
+					phase: planNow.current_phase ?? 1,
+					specHash_plan: planHashNow,
+					specHash_current: specNow?.hash ?? null,
+					reason:
+						'canonical spec write rebound the plan spec hash before the drift marker materialized',
+					timestamp: _internals.now(),
+				};
+				// F-001: the synthesized identity must be stable across retries.
+				// The marker-present path hashes the marker file bytes; hashing the
+				// synthesized object would fold in `timestamp: now()`, so a
+				// crash-retry with a later clock produced a different markerHash for
+				// the same drift state and the PREPARED WAL replay misread it as an
+				// on-disk marker replacement — fabricating a blocking
+				// spec-staleness.json that never existed. Hash only the stable drift
+				// fields: same drift, same identity, idempotent replay.
+				markerHash = sha256(
+					JSON.stringify({
+						planTitle: marker.planTitle,
+						phase: marker.phase,
+						specHash_plan: marker.specHash_plan,
+						specHash_current: marker.specHash_current,
+						reason: marker.reason,
+					}),
+				);
+				markerSynthesized = true;
+			} else {
+				marker = _internals.parseMarker(authoritativeMarkerRaw);
+				if (!marker) {
+					return buildCorruptMarkerResult(options.mode);
+				}
+				markerHash = sha256(authoritativeMarkerRaw);
+			}
+			errorMarker = marker;
 
 			const currentSpec = _internals.readEffectiveSpecSync(directory);
+			if (options.reconcilePlanHashWithoutMarker && currentSpec === null) {
+				return {
+					status: 'failed',
+					mode: options.mode,
+					message:
+						'Spec drift recovery failed: the canonical spec is missing, unreadable, or exceeds the native reader limit after spec_write. The plan binding was not changed.',
+					phase: marker.phase,
+					planTitle: marker.planTitle,
+					previousHash: marker.specHash_plan,
+					newHash: null,
+					transitionId: existingWal?.transitionId,
+				};
+			}
 			const proposedNewHash = currentSpec?.hash ?? null;
 			const proposedTransitionId = buildTransitionId(
 				options.mode,
@@ -486,7 +729,7 @@ export async function reconcileSpecDrift(
 				marker.specHash_plan,
 				proposedNewHash,
 			);
-			const proposedWal: SpecDriftRecoveryWal = {
+			let proposedWal: SpecDriftRecoveryWal = {
 				version: 2,
 				mode: options.mode,
 				state: 'PREPARED',
@@ -500,17 +743,41 @@ export async function reconcileSpecDrift(
 				actor: options.actor,
 				recordedAt: _internals.now(),
 			};
+			if (existingWal?.state !== 'PREPARED') {
+				proposedWal = {
+					...proposedWal,
+					transitionId: await buildUnusedTransitionId(
+						directory,
+						options.mode,
+						proposedTransitionId,
+					),
+				};
+			}
 
-			const markerReplacedDuringPrepared =
+			// F-001: a synthesized marker has no on-disk file, so no on-disk
+			// marker can have been replaced while the WAL was prepared. A real
+			// marker materialized by loadPlan for the SAME captured drift is late
+			// materialization, not a replacement: its timestamp changes the file
+			// hash but its plan/spec identities still match the WAL. Only a real
+			// marker for different drift preserves the replacement path; newer
+			// drift remains protected by the latest-spec check below.
+			const markerMatchesPreparedDrift =
 				existingWal?.state === 'PREPARED' &&
-				existingWal.markerHash !== markerHash;
-			const wal =
+				marker.planTitle === existingWal.planTitle &&
+				marker.phase === existingWal.phase &&
+				marker.specHash_plan === existingWal.previousHash &&
+				marker.specHash_current === existingWal.newHash;
+			const markerReplacedDuringPrepared =
+				!markerSynthesized &&
+				existingWal?.state === 'PREPARED' &&
+				!markerMatchesPreparedDrift;
+			let wal =
 				existingWal?.state === 'PREPARED' ||
 				existingWal?.markerHash === markerHash
 					? existingWal
 					: proposedWal;
-			const transitionId = wal.transitionId;
-			const newHash = wal.newHash;
+			let transitionId = wal.transitionId;
+			let newHash = wal.newHash;
 			errorTransitionId = transitionId;
 			errorNewHash = newHash;
 			if (wal === proposedWal) {
@@ -539,6 +806,22 @@ export async function reconcileSpecDrift(
 					newHash,
 					transitionId,
 				};
+			}
+
+			// F-001 (closeout): a COMMITTED WAL proves the earlier repair only
+			// while the plan still carries that transaction's captured hash. If
+			// the plan later returns to the same old hash, the stable synthetic
+			// marker identity repeats and selecting the committed WAL would skip
+			// the PREPARED-only rebind below — reporting `applied` while the plan
+			// remained stale. Start the fresh, collision-free transaction prepared
+			// above; a committed WAL is reusable only after its rebind is still true.
+			if (wal.state === 'COMMITTED' && (plan.specHash ?? null) !== newHash) {
+				wal = proposedWal;
+				transitionId = wal.transitionId;
+				newHash = wal.newHash;
+				errorTransitionId = transitionId;
+				errorNewHash = newHash;
+				await _internals.writeWal(walPath, wal);
 			}
 
 			if (wal.state === 'PREPARED') {
@@ -659,8 +942,9 @@ export async function reconcileSpecDrift(
 			return {
 				status: 'applied',
 				mode: wal.mode,
-				message:
-					wal.mode === 'repair'
+				message: markerSynthesized
+					? `Plan spec hash rebound to the canonical spec for plan "${wal.planTitle}" (phase ${wal.phase}) before a drift marker materialized.`
+					: wal.mode === 'repair'
 						? `Spec drift repaired for plan "${wal.planTitle}" (phase ${wal.phase}).`
 						: `Spec drift acknowledged for plan "${wal.planTitle}" (phase ${wal.phase}).`,
 				phase: wal.phase,

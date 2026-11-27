@@ -7,6 +7,8 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { createHash } from 'node:crypto';
+import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -47,6 +49,38 @@ async function removeStalenessFile(): Promise<void> {
 	} catch {
 		// best effort
 	}
+}
+
+const SPEC_CONTENT = '# Spec\n';
+
+async function writeRecoveryWal(
+	state: 'PREPARED' | 'COMMITTED' | 'corrupt',
+): Promise<void> {
+	const raw =
+		state === 'corrupt'
+			? '{ bad wal'
+			: JSON.stringify({
+					version: 2,
+					mode: 'repair',
+					state,
+					transitionId: `test-${state}`,
+					markerHash: 'marker-hash',
+					planTitle: 'Plan',
+					phase: 1,
+					previousHash: 'old',
+					// newHash must be the hash of the captured content, as the
+					// recovery run requires (F-002); a mismatched pair is corrupt.
+					newHash: createHash('sha256')
+						.update(SPEC_CONTENT, 'utf-8')
+						.digest('hex'),
+					specContent: SPEC_CONTENT,
+					actor: 'spec_write',
+					recordedAt: '2026-11-25T00:00:00.000Z',
+				});
+	await fs.writeFile(
+		path.join(tmpDir, '.swarm', 'spec-drift-recovery.json'),
+		raw,
+	);
 }
 
 const NON_BLOCKED_TOOLS = [
@@ -97,10 +131,13 @@ describe('enforceSpecDriftGate', () => {
 		}
 	});
 
-	test('explains that clarify alone does not clear drift', async () => {
+	test('explains the agent-executable repair path and that clarify alone does not clear drift', async () => {
 		await writeStalenessFile();
 		expect(() => enforceSpecDriftGate(tmpDir, 'save_plan')).toThrow(
-			/Clarify alone does not clear drift/,
+			/clarify alone does not clear drift/i,
+		);
+		expect(() => enforceSpecDriftGate(tmpDir, 'save_plan')).toThrow(
+			/canonical spec_write/,
 		);
 	});
 
@@ -123,6 +160,35 @@ describe('enforceSpecDriftGate', () => {
 			/SPEC_DRIFT_BLOCK/,
 		);
 		await removeStalenessFile();
+		expect(() => enforceSpecDriftGate(tmpDir, 'save_plan')).not.toThrow();
+	});
+
+	test('a PREPARED recovery WAL blocks protected mutations without a marker', async () => {
+		await writeRecoveryWal('PREPARED');
+		expect(() => enforceSpecDriftGate(tmpDir, 'save_plan')).toThrow(
+			/PREPARED spec-drift recovery transaction is incomplete/,
+		);
+		expect(() => enforceSpecDriftGate(tmpDir, 'save_plan')).toThrow(
+			/canonical spec_write/,
+		);
+		expect(() => enforceSpecDriftGate(tmpDir, 'save_plan')).toThrow(
+			/acknowledge-spec-drift alone does not clear a WAL-only block/,
+		);
+		expect(() => enforceSpecDriftGate(tmpDir, 'spec_write')).not.toThrow();
+	});
+
+	test('a corrupt recovery WAL fails closed at the mutation gate', async () => {
+		await writeRecoveryWal('corrupt');
+		expect(() => enforceSpecDriftGate(tmpDir, 'update_task_status')).toThrow(
+			/corrupt or unreadable/,
+		);
+		expect(() => enforceSpecDriftGate(tmpDir, 'update_task_status')).toThrow(
+			/Neither canonical spec_write nor \/swarm acknowledge-spec-drift can clear a corrupt WAL/,
+		);
+	});
+
+	test('a COMMITTED recovery WAL alone does not block protected mutations', async () => {
+		await writeRecoveryWal('COMMITTED');
 		expect(() => enforceSpecDriftGate(tmpDir, 'save_plan')).not.toThrow();
 	});
 

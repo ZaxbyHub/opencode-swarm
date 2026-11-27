@@ -415,48 +415,6 @@
 			"note": "Pre-existing debt, not approved drift: \"isRejectedSkillContent\" exists in src/services/skill-evaluator.ts but not inside src/services/skill-evaluator.ts:549 (skills-rejected-edits.readerCitations[0])."
 		},
 		{
-			"rowId": "spec-drift-artifacts",
-			"file": "src/services/spec-drift-recovery.ts",
-			"identifier": "appendEvent",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"appendEvent\" exists in src/services/spec-drift-recovery.ts but not inside :278 (spec-drift-artifacts.writerCitations[0])."
-		},
-		{
-			"rowId": "spec-drift-artifacts",
-			"file": "src/services/spec-drift-recovery.ts",
-			"identifier": "ensureSnapshotEvent",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"ensureSnapshotEvent\" exists in src/services/spec-drift-recovery.ts but not inside :239 (spec-drift-artifacts.writerCitations[0])."
-		},
-		{
-			"rowId": "spec-drift-artifacts",
-			"file": "src/services/spec-drift-recovery.ts",
-			"identifier": "parseMarker",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"parseMarker\" exists in src/services/spec-drift-recovery.ts but not inside spec-drift-recovery.ts:115 (spec-drift-artifacts.readerCitations[0])."
-		},
-		{
-			"rowId": "spec-drift-artifacts",
-			"file": "src/services/spec-drift-recovery.ts",
-			"identifier": "parseWal",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"parseWal\" exists in src/services/spec-drift-recovery.ts but not inside :152 (spec-drift-artifacts.readerCitations[0])."
-		},
-		{
-			"rowId": "spec-drift-artifacts",
-			"file": "src/services/spec-drift-recovery.ts",
-			"identifier": "verifyEventPresence",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"verifyEventPresence\" exists in src/services/spec-drift-recovery.ts but not inside :303 (spec-drift-artifacts.readerCitations[0])."
-		},
-		{
-			"rowId": "spec-drift-artifacts",
-			"file": "src/services/spec-drift-recovery.ts",
-			"identifier": "writeWal",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"writeWal\" exists in src/services/spec-drift-recovery.ts but not inside src/services/spec-drift-recovery.ts:207 (spec-drift-artifacts.writerCitations[0])."
-		},
-		{
 			"rowId": "status-artifacts",
 			"file": "src/background/status-artifact.ts",
 			"identifier": "AutomationStatusArtifact",

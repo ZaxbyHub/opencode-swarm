@@ -1171,7 +1171,7 @@ export function formatStatusMarkdown(status: StatusData): string {
 		lines.push(
 			'',
 			`**Spec drift detected**: ${reason} (stored: ${stored}, current: ${current})`,
-			'Run `/swarm clarify` to enter spec repair mode. Clarify alone does not clear drift: rewrite the spec so recovery can reconcile it, or run `/swarm acknowledge-spec-drift` to dismiss.',
+			'Run `/swarm clarify` to enter spec repair mode (clarify alone does not clear drift). Agent-executable repair: persist the accepted spec through the canonical spec_write tool — its drift recovery reconciles the plan hash and clears the marker. The user may also run `/swarm acknowledge-spec-drift` to dismiss.',
 		);
 	}
 
@@ -1573,7 +1573,7 @@ function renderNoActivePlanStatusTail(statusData: StatusData): string {
 			'No active swarm plan found.',
 			'',
 			`**Spec drift detected**: ${reason} (stored: ${stored}, current: ${current})`,
-			'Run `/swarm clarify` to enter spec repair mode. Clarify alone does not clear drift: rewrite the spec so recovery can reconcile it, or run `/swarm acknowledge-spec-drift` to dismiss.',
+			'Run `/swarm clarify` to enter spec repair mode (clarify alone does not clear drift). Agent-executable repair: persist the accepted spec through the canonical spec_write tool — its drift recovery reconciles the plan hash and clears the marker. The user may also run `/swarm acknowledge-spec-drift` to dismiss.',
 			...(decisionDriftLines ?? []),
 		].join('\n');
 	}
