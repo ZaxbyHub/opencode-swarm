@@ -367,6 +367,11 @@ async function commitPrepared(
 				alreadyApplied: false,
 			};
 		},
+		// Issue #2525: the WAL transition must survive a receipt-append
+		// failure so the settlement replay (alreadyApplied) can re-publish
+		// the missing receipt; route-publication flows keep the default
+		// compensating (all-or-nothing) behavior.
+		{ preserveEvidenceOnReceiptAppendFailure: true },
 	);
 }
 
