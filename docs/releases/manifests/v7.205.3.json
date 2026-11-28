@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.205.3",
+  "tagCommit": "e1f8c0e9e21bea210db99b31393935f18673e976",
+  "targetCommitish": "e1f8c0e9e21bea210db99b31393935f18673e976",
+  "releaseBodySha256": "5360e49fd8d185dc614cf8b4eedbea97ba7b38126ffcb6ec01f557ae90b4c987",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/dev-null-redirect-not-a-write.md",
+      "sha256": "6c7abb6d238ace6e86cfa6d93d731985456b4ae69c8df14686c247ae73aebac8"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/heredoc-write-guard-parse-clarity.md",
+      "sha256": "a44b796601b598e9ed3df074da7d62520a31e1362b2367006171d5033215a313"
+    }
+  ]
+}
