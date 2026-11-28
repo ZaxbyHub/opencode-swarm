@@ -778,6 +778,17 @@ export interface BackgroundDelegationIngestion {
 	 * Absent on legacy records written before r14.
 	 */
 	outcome?: DurableIngestionOutcome;
+	/**
+	 * Bounded human-readable reason of the LAST retryable commit (the
+	 * Stage-B apply's `reason`, e.g. the scope-handoff reconstruction
+	 * failure). Persisted so a deterministic ingestion failure is diagnosable
+	 * from the durable record alone — the attempt counter alone cannot say
+	 * WHY every attempt failed (observed live: a five-attempt burn whose
+	 * per-attempt reasons existed only in process-local return values).
+	 * Preserved across a later claim (the next commit either overwrites it or
+	 * the claim's lease expires without one); dropped on the consumed flip.
+	 */
+	lastReason?: string;
 }
 
 /**
@@ -1107,6 +1118,9 @@ const DelegationIngestionSchema = z
 		claimToken: z.string().min(1).max(256),
 		leaseExpiresAt: z.number().int().nonnegative().optional(),
 		outcome: z.enum(['accepted', 'rejected', 'skipped', 'stale']).optional(),
+		// F3 observability: bounded reason of the last retryable commit (the
+		// Stage-B apply's failure reason), for durable diagnosability.
+		lastReason: z.string().min(1).max(256).optional(),
 	})
 	.strict()
 	.superRefine((value, context) => {
@@ -1128,6 +1142,14 @@ const DelegationIngestionSchema = z
 			context.addIssue({
 				code: z.ZodIssueCode.custom,
 				message: 'ingestion outcome is only allowed on a consumed state',
+			});
+		}
+		// F3 observability: the last-failure reason belongs to the
+		// claimed/retryable states only — a consumed flip never carries one.
+		if (value.state === 'consumed' && value.lastReason !== undefined) {
+			context.addIssue({
+				code: z.ZodIssueCode.custom,
+				message: 'consumed ingestion cannot retain a last-failure reason',
 			});
 		}
 	});
@@ -5920,6 +5942,13 @@ export async function claimDelegationIngestion(
 						updatedAt: now,
 						claimToken,
 						leaseExpiresAt: now + leaseMs,
+						// Preserve the last retryable reason across the claim: the
+						// claim itself has no verdict yet, and if this claim's lease
+						// expires before any commit, the durable record still says why
+						// the previous attempt failed.
+						...(current.ingestion?.lastReason !== undefined
+							? { lastReason: current.ingestion.lastReason }
+							: {}),
 					},
 					updatedAt: now,
 				};
@@ -5937,6 +5966,16 @@ export async function claimDelegationIngestion(
 	}
 }
 
+/** Bound a retryable-commit reason for durable persistence (F3). */
+function boundedIngestionReason(
+	reason: string | undefined,
+): string | undefined {
+	if (reason === undefined) return undefined;
+	const trimmed = reason.trim();
+	if (!trimmed) return undefined;
+	return trimmed.length > 256 ? `${trimmed.slice(0, 253)}...` : trimmed;
+}
+
 /** Commit an ingestion claim to consumed or retryable ingestion_error.
  *
  * r14 audit repair (P0-1): the semantic outcome of the consumed commit is
@@ -5951,7 +5990,12 @@ export async function recordDelegationIngestionResult(
 	correlationId: string,
 	claimToken: string,
 	success: boolean,
-	options: { now?: number; outcome?: DurableIngestionOutcome } = {},
+	options: {
+		now?: number;
+		outcome?: DurableIngestionOutcome;
+		/** Reason of a retryable commit (bounded); see lastReason. */
+		reason?: string;
+	} = {},
 ): Promise<BackgroundDelegationRecord | null> {
 	if (!correlationId || !claimToken) return null;
 	let result: BackgroundDelegationRecord | null = null;
@@ -5993,6 +6037,16 @@ export async function recordDelegationIngestionResult(
 				// terminal), and `ingestion_error` is a non-terminal retryable
 				// state, so neither write establishes a first terminal
 				// disposition.
+				// F3 observability: a retryable commit persists WHY this attempt
+				// failed (the Stage-B apply's reason) on the same atomic write as
+				// the retryable flip — the attempt counter alone cannot diagnose a
+				// deterministic failure from the durable record. Falls back to the
+				// previous reason when this caller has none; a consumed flip never
+				// carries one.
+				const retryReason = success
+					? undefined
+					: (boundedIngestionReason(options.reason) ??
+						current.ingestion?.lastReason);
 				const next: BackgroundDelegationRecord = {
 					...current,
 					schemaVersion: current.schemaVersion === 4 ? 4 : 3,
@@ -6009,6 +6063,7 @@ export async function recordDelegationIngestionResult(
 						...(success
 							? { outcome: options.outcome ?? ('accepted' as const) }
 							: {}),
+						...(retryReason !== undefined ? { lastReason: retryReason } : {}),
 					},
 					updatedAt,
 				};
