@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.205.14](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.205.13...v7.205.14) (2026-11-28)
+
+
+### Bug Fixes
+
+* **swarm:** the swarm_communication_debug wedge, all layers (terminal settlement, phase participation, state zone, docs ancestry, review-route fallback, completion event-text authority, durable SB binding, binding-write visibility, SB workflow generation, background-settlement Stage-A justification, child-activity-aware stale sweep, scope-refusal retry accounting) ([05ba518](https://github.com/ZaxbyHub/opencode-swarm/commit/05ba518fedacf647406c2ab133c328be8577ee11))
+* **tests:** align four pre-existing suites with this PR's intentional behavior changes ([e4b7c6e](https://github.com/ZaxbyHub/opencode-swarm/commit/e4b7c6e5df29401f65cdb02a9fdbba90bb98fbfd))
+
 ## [7.205.13](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.205.12...v7.205.13) (2026-11-28)
 
 
