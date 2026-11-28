@@ -386,6 +386,8 @@ export interface BackgroundWorkspaceSnapshot {
 	gitHead: string | null;
 	dirtyHash: string | null;
 	changedFiles?: string[] | null;
+	/** Content identities for changed files inside a declared scope, when captured. */
+	changedFileHashes?: Record<string, string> | null;
 	prHeadSha: string | null;
 	scope: string | null;
 }
@@ -940,6 +942,7 @@ const WorkspaceSchema = z
 		gitHead: z.string().nullable(),
 		dirtyHash: z.string().nullable(),
 		changedFiles: z.array(z.string()).nullable().optional(),
+		changedFileHashes: z.record(z.string(), z.string()).nullable().optional(),
 		prHeadSha: z.string().nullable(),
 		scope: z.string().nullable(),
 	})

@@ -43,7 +43,8 @@ src/context-map/capsule-persistence.ts: 1
 src/context-map/telemetry.ts: 1
 src/db/legacy-import.ts: 1
 src/epic/legacy-migration.ts: 2
-src/evidence/manager.ts: 1
+# APPROVED-NEW: src/evidence/manager.ts: 2
+src/evidence/manager.ts: 2
 src/harness/store.ts: 2
 src/hooks/delegation-gate/worktree-merge-status.ts: 1
 src/hooks/guardrails/shell-audit-store.ts: 1

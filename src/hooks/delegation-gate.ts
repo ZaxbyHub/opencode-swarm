@@ -6972,6 +6972,7 @@ export function createDelegationGateHook(
 								: await captureWorkspaceSnapshotAsync(directory, {
 										prHeadSha,
 										scope,
+										captureChangedFileHashes: true,
 									});
 							// r13 repair (audit P0-2): the binding is the PRE-EXECUTION
 							// baseline captured by this gate's toolBefore hook BEFORE

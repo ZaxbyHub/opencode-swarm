@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { validateSwarmPath } from '../hooks/utils.js';
+import { isPathWithinDeclaredScope } from '../scope/path-identity.js';
 import { atomicWriteSwarmFile } from '../utils/atomic-write.js';
 import {
 	type BunCompatSpawnOptions,
@@ -11,6 +12,7 @@ import {
 } from '../utils/bun-compat.js';
 import { canonicalRootKey, sameProjectRoot } from '../utils/canonical-root.js';
 import { resolveGitExecutable } from '../utils/git-executable.js';
+import { normalizeAttributionPath } from './attribution-path.js';
 import type { BackgroundWorkspaceSnapshot } from './pending-delegations.js';
 
 const GIT_SNAPSHOT_TIMEOUT_MS = 3_000;
@@ -56,6 +58,15 @@ const REVISION_YIELD_EVERY_CHUNKS = 16;
  * while remaining a bounded subprocess call per AGENTS.md invariant 3.
  */
 const REVISION_ENUMERATION_TIMEOUT_MS = 15_000;
+/** Bounds for optional scoped dirty-content identities captured for Stage B. */
+const MAX_SCOPED_DIRTY_HASH_FILES = 512;
+const MAX_SCOPED_DIRTY_HASH_FILE_BYTES = 8 * 1024 * 1024;
+const MAX_SCOPED_DIRTY_HASH_TOTAL_BYTES = 64 * 1024 * 1024;
+
+interface ScopedDirtyHash {
+	hash: string;
+	bytes: number;
+}
 
 type SpawnSync = typeof child_process.spawnSync;
 
@@ -92,7 +103,10 @@ async function readBoundedGitOutput(
 			joined.set(chunk, offset);
 			offset += chunk.byteLength;
 		}
-		return { text: new TextDecoder().decode(joined), truncated: false };
+		return {
+			text: new TextDecoder('utf-8', { fatal: true }).decode(joined),
+			truncated: false,
+		};
 	} finally {
 		try {
 			await reader.cancel();
@@ -116,6 +130,8 @@ interface CaptureWorkspaceSnapshotOptions {
 	 * live local ref, not replay the stored metadata back into the snapshot.
 	 */
 	resolveCurrentPrHeadSha?: boolean;
+	/** Capture bounded content identities for in-scope dirty files. */
+	captureChangedFileHashes?: boolean;
 }
 
 function runGit(
@@ -128,14 +144,21 @@ function runGit(
 		['-C', directory, ...args],
 		{
 			cwd: directory,
-			encoding: 'utf-8',
 			timeout: timeoutMs,
 			maxBuffer: GIT_SNAPSHOT_MAX_BUFFER,
 			stdio: ['ignore', 'pipe', 'pipe'],
 		},
 	);
 	if (result.error || result.status !== 0) return null;
-	return typeof result.stdout === 'string' ? result.stdout.trimEnd() : null;
+	const stdout = result.stdout as Buffer | string;
+	if (typeof stdout === 'string') return stdout.trimEnd();
+	try {
+		return new TextDecoder('utf-8', { fatal: true }).decode(stdout).trimEnd();
+	} catch {
+		// Git paths are byte strings. A lossy decode could alias distinct
+		// filesystem objects, so degraded output must fail the snapshot closed.
+		return null;
+	}
 }
 
 /**
@@ -253,7 +276,6 @@ function runGitDetailed(
 		['-C', directory, ...args],
 		{
 			cwd: directory,
-			encoding: 'utf-8',
 			timeout: timeoutMs,
 			maxBuffer: _internals.gitSnapshotMaxBuffer,
 			stdio: ['ignore', 'pipe', 'pipe'],
@@ -262,14 +284,24 @@ function runGitDetailed(
 	const errorCode = (result.error as NodeJS.ErrnoException | undefined)?.code;
 	if (errorCode === 'ENOBUFS') return { ok: false, reason: 'buffer-truncated' };
 	if (errorCode === 'ETIMEDOUT') return { ok: false, reason: 'timeout' };
-	if (
-		result.error ||
-		result.status !== 0 ||
-		typeof result.stdout !== 'string'
-	) {
+	if (result.error || result.status !== 0) {
 		return { ok: false, reason: 'git-failed' };
 	}
-	return { ok: true, text: result.stdout.trimEnd() };
+	const stdout = result.stdout as Buffer | string;
+	if (typeof stdout === 'string') {
+		return { ok: true, text: stdout.trimEnd() };
+	}
+	try {
+		return {
+			ok: true,
+			text: new TextDecoder('utf-8', { fatal: true }).decode(stdout).trimEnd(),
+		};
+	} catch {
+		// Path output is bytes. A lossy decode rewrites a non-UTF-8 name to
+		// U+FFFD, so the digest would hash a path that does not exist on disk
+		// and could miss a content change to the real file. Fail closed instead.
+		return { ok: false, reason: 'git-failed' };
+	}
 }
 
 /**
@@ -2043,6 +2075,7 @@ function parseCaptureOptions(
 	scope: string | null;
 	configuredPrHeadSha: string | null;
 	resolveCurrentPrHeadSha: boolean;
+	captureChangedFileHashes: boolean;
 } {
 	const scope =
 		typeof optionsOrScope === 'object' && optionsOrScope !== null
@@ -2058,7 +2091,206 @@ function parseCaptureOptions(
 		typeof optionsOrScope === 'object' &&
 		optionsOrScope !== null &&
 		optionsOrScope.resolveCurrentPrHeadSha === true;
-	return { scope, configuredPrHeadSha, resolveCurrentPrHeadSha };
+	const captureChangedFileHashes =
+		typeof optionsOrScope === 'object' &&
+		optionsOrScope !== null &&
+		optionsOrScope.captureChangedFileHashes === true;
+	return {
+		scope,
+		configuredPrHeadSha,
+		resolveCurrentPrHeadSha,
+		captureChangedFileHashes,
+	};
+}
+
+function scopedDirtyPaths(
+	directory: string,
+	scope: string | null,
+	files: readonly string[] | null | undefined,
+): string[] | null {
+	if (!scope || !files) return null;
+	const entries = scope
+		.split(',')
+		.map((entry) => normalizeAttributionPath(entry))
+		.filter(
+			(entry): entry is string =>
+				entry !== null && entry.length > 0 && !/^\d+(?:\.\d+)*$/.test(entry),
+		);
+	if (entries.length === 0) return null;
+	// Authored scope is normalized, but Git-observed paths are exact filesystem
+	// names. Rewriting a trailing space, literal backslash, or control character
+	// would hash a different object and could miss an in-scope edit.
+	return files.filter(
+		(file) =>
+			file.length > 0 &&
+			!file.startsWith('/') &&
+			!/^[A-Za-z]:\//.test(file) &&
+			!file.split('/').includes('..') &&
+			isPathWithinDeclaredScope(file, entries, directory),
+	);
+}
+
+function hashScopedDirtyFileSync(
+	filePath: string,
+	remainingBytes: number,
+): ScopedDirtyHash | null {
+	let fd: number | undefined;
+	try {
+		if (fs.lstatSync(filePath).isSymbolicLink()) return null;
+		fd = fs.openSync(
+			filePath,
+			fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0),
+		);
+		const stat = fs.fstatSync(fd);
+		const limit = Math.min(
+			_internals.scopedDirtyHashMaxFileBytes,
+			remainingBytes,
+		);
+		if (!stat.isFile() || stat.size > limit) return null;
+		_internals.beforeScopedDirtyRead(filePath);
+		const buffer = Buffer.allocUnsafe(limit);
+		let offset = 0;
+		while (offset < limit) {
+			const read = _internals.readScopedDirtyFileSync(
+				fd,
+				buffer,
+				offset,
+				limit - offset,
+			);
+			if (read === 0) break;
+			offset += read;
+		}
+		// Do not read a detection byte beyond the budget. Re-stat the same open
+		// object instead: growth or shrinkage during the read cannot be certified.
+		const after = fs.fstatSync(fd);
+		if (
+			!after.isFile() ||
+			after.size !== stat.size ||
+			after.size !== offset ||
+			after.mode !== stat.mode
+		)
+			return null;
+		return {
+			hash: createHash('sha256')
+				.update(`file:${stat.mode.toString(16)}\n`)
+				.update(buffer.subarray(0, offset))
+				.digest('hex'),
+			bytes: offset,
+		};
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
+			return { hash: 'missing', bytes: 0 };
+		}
+		return null;
+	} finally {
+		if (fd !== undefined) {
+			try {
+				fs.closeSync(fd);
+			} catch {
+				// best-effort close; the read result remains bounded
+			}
+		}
+	}
+}
+
+async function hashScopedDirtyFileAsync(
+	filePath: string,
+	remainingBytes: number,
+): Promise<ScopedDirtyHash | null> {
+	let handle: fs.promises.FileHandle | undefined;
+	try {
+		if ((await fs.promises.lstat(filePath)).isSymbolicLink()) return null;
+		handle = await fs.promises.open(
+			filePath,
+			fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0),
+		);
+		const stat = await handle.stat();
+		const limit = Math.min(
+			_internals.scopedDirtyHashMaxFileBytes,
+			remainingBytes,
+		);
+		if (!stat.isFile() || stat.size > limit) return null;
+		await _internals.beforeScopedDirtyRead(filePath);
+		const buffer = Buffer.allocUnsafe(limit);
+		let offset = 0;
+		while (offset < limit) {
+			const read = await _internals.readScopedDirtyFileAsync(
+				handle,
+				buffer,
+				offset,
+				limit - offset,
+			);
+			if (read === 0) break;
+			offset += read;
+		}
+		// The async twin applies the same exact-budget/post-read identity rule.
+		const after = await handle.stat();
+		if (
+			!after.isFile() ||
+			after.size !== stat.size ||
+			after.size !== offset ||
+			after.mode !== stat.mode
+		)
+			return null;
+		return {
+			hash: createHash('sha256')
+				.update(`file:${stat.mode.toString(16)}\n`)
+				.update(buffer.subarray(0, offset))
+				.digest('hex'),
+			bytes: offset,
+		};
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
+			return { hash: 'missing', bytes: 0 };
+		}
+		return null;
+	} finally {
+		await handle?.close().catch(() => {});
+	}
+}
+
+function captureScopedDirtyHashesSync(
+	directory: string,
+	scope: string | null,
+	files: readonly string[] | null | undefined,
+): Record<string, string> | null {
+	const scoped = scopedDirtyPaths(directory, scope, files);
+	if (scoped === null || scoped.length > MAX_SCOPED_DIRTY_HASH_FILES)
+		return null;
+	const hashes: Record<string, string> = {};
+	let totalBytes = 0;
+	for (const file of scoped) {
+		const identity = hashScopedDirtyFileSync(
+			path.join(directory, file),
+			_internals.scopedDirtyHashMaxTotalBytes - totalBytes,
+		);
+		if (identity === null) return null;
+		totalBytes += identity.bytes;
+		hashes[file] = identity.hash;
+	}
+	return hashes;
+}
+
+async function captureScopedDirtyHashesAsync(
+	directory: string,
+	scope: string | null,
+	files: readonly string[] | null | undefined,
+): Promise<Record<string, string> | null> {
+	const scoped = scopedDirtyPaths(directory, scope, files);
+	if (scoped === null || scoped.length > MAX_SCOPED_DIRTY_HASH_FILES)
+		return null;
+	const hashes: Record<string, string> = {};
+	let totalBytes = 0;
+	for (const file of scoped) {
+		const identity = await hashScopedDirtyFileAsync(
+			path.join(directory, file),
+			_internals.scopedDirtyHashMaxTotalBytes - totalBytes,
+		);
+		if (identity === null) return null;
+		totalBytes += identity.bytes;
+		hashes[file] = identity.hash;
+	}
+	return hashes;
 }
 
 /**
@@ -2079,8 +2311,12 @@ export function captureWorkspaceSnapshot(
 	optionsOrScope: string | null | CaptureWorkspaceSnapshotOptions = null,
 	prHeadShaArg: string | null = null,
 ): BackgroundWorkspaceSnapshot {
-	const { scope, configuredPrHeadSha, resolveCurrentPrHeadSha } =
-		parseCaptureOptions(optionsOrScope, prHeadShaArg);
+	const {
+		scope,
+		configuredPrHeadSha,
+		resolveCurrentPrHeadSha,
+		captureChangedFileHashes,
+	} = parseCaptureOptions(optionsOrScope, prHeadShaArg);
 	const upstreamBefore = resolveCurrentPrHeadSha
 		? runGit(directory, ['rev-parse', '@{upstream}'])
 		: null;
@@ -2098,6 +2334,9 @@ export function captureWorkspaceSnapshot(
 		porcelainRaw === null ? null : filterSwarmRuntimePorcelain(porcelainRaw);
 	const snapshot =
 		porcelain === null ? null : parsePorcelainV2Snapshot(porcelain);
+	const changedFiles = snapshot
+		? [...new Set([...snapshot.dirtyTrackedPaths, ...snapshot.untrackedPaths])]
+		: null;
 	const upstreamAfter = resolveCurrentPrHeadSha
 		? runGit(directory, ['rev-parse', '@{upstream}'])
 		: null;
@@ -2115,14 +2354,16 @@ export function captureWorkspaceSnapshot(
 		directory: canonicalRootKey(directory),
 		gitHead: snapshot?.gitHead ?? null,
 		dirtyHash: porcelain === null ? null : digest(porcelain),
-		changedFiles: snapshot
-			? [
-					...new Set([
-						...snapshot.dirtyTrackedPaths,
-						...snapshot.untrackedPaths,
-					]),
-				]
-			: null,
+		changedFiles,
+		...(captureChangedFileHashes
+			? {
+					changedFileHashes: captureScopedDirtyHashesSync(
+						directory,
+						scope,
+						changedFiles,
+					),
+				}
+			: {}),
 		prHeadSha,
 		scope,
 	};
@@ -2149,8 +2390,12 @@ export async function captureWorkspaceSnapshotAsync(
 	optionsOrScope: string | null | CaptureWorkspaceSnapshotOptions = null,
 	prHeadShaArg: string | null = null,
 ): Promise<BackgroundWorkspaceSnapshot> {
-	const { scope, configuredPrHeadSha, resolveCurrentPrHeadSha } =
-		parseCaptureOptions(optionsOrScope, prHeadShaArg);
+	const {
+		scope,
+		configuredPrHeadSha,
+		resolveCurrentPrHeadSha,
+		captureChangedFileHashes,
+	} = parseCaptureOptions(optionsOrScope, prHeadShaArg);
 	const upstreamBefore = resolveCurrentPrHeadSha
 		? await runGitAsync(directory, ['rev-parse', '@{upstream}'])
 		: null;
@@ -2168,6 +2413,9 @@ export async function captureWorkspaceSnapshotAsync(
 		porcelainRaw === null ? null : filterSwarmRuntimePorcelain(porcelainRaw);
 	const snapshot =
 		porcelain === null ? null : parsePorcelainV2Snapshot(porcelain);
+	const changedFiles = snapshot
+		? [...new Set([...snapshot.dirtyTrackedPaths, ...snapshot.untrackedPaths])]
+		: null;
 	const upstreamAfter = resolveCurrentPrHeadSha
 		? await runGitAsync(directory, ['rev-parse', '@{upstream}'])
 		: null;
@@ -2182,14 +2430,16 @@ export async function captureWorkspaceSnapshotAsync(
 		directory: canonicalRootKey(directory),
 		gitHead: snapshot?.gitHead ?? null,
 		dirtyHash: porcelain === null ? null : digest(porcelain),
-		changedFiles: snapshot
-			? [
-					...new Set([
-						...snapshot.dirtyTrackedPaths,
-						...snapshot.untrackedPaths,
-					]),
-				]
-			: null,
+		changedFiles,
+		...(captureChangedFileHashes
+			? {
+					changedFileHashes: await captureScopedDirtyHashesAsync(
+						directory,
+						scope,
+						changedFiles,
+					),
+				}
+			: {}),
 		prHeadSha,
 		scope,
 	};
@@ -2468,6 +2718,22 @@ export const _internals: {
 	 * drives via the existing `yieldControl` seam.
 	 */
 	readChangedFileSync: (filePath: string) => Buffer;
+	/** Exact scoped-dirty read budgets and race probes used by focused tests. */
+	scopedDirtyHashMaxFileBytes: number;
+	scopedDirtyHashMaxTotalBytes: number;
+	beforeScopedDirtyRead: (filePath: string) => void | Promise<void>;
+	readScopedDirtyFileSync: (
+		fd: number,
+		buffer: Buffer,
+		offset: number,
+		length: number,
+	) => number;
+	readScopedDirtyFileAsync: (
+		handle: fs.promises.FileHandle,
+		buffer: Buffer,
+		offset: number,
+		length: number,
+	) => Promise<number>;
 } = {
 	spawnSync: child_process.spawnSync,
 	bunSpawn,
@@ -2480,4 +2746,13 @@ export const _internals: {
 	gitSnapshotMaxBuffer: GIT_SNAPSHOT_MAX_BUFFER,
 	revisionEnumerationTimeoutMs: REVISION_ENUMERATION_TIMEOUT_MS,
 	readChangedFileSync: (filePath: string) => fs.readFileSync(filePath),
+	scopedDirtyHashMaxFileBytes: MAX_SCOPED_DIRTY_HASH_FILE_BYTES,
+	scopedDirtyHashMaxTotalBytes: MAX_SCOPED_DIRTY_HASH_TOTAL_BYTES,
+	beforeScopedDirtyRead: () => {},
+	readScopedDirtyFileSync: (fd, buffer, offset, length) =>
+		fs.readSync(fd, buffer, offset, length, null),
+	readScopedDirtyFileAsync: async (handle, buffer, offset, length) => {
+		const { bytesRead } = await handle.read(buffer, offset, length, null);
+		return bytesRead;
+	},
 };
