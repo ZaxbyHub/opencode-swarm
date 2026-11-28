@@ -144,4 +144,72 @@ describe('session.idle must not revoke a delegated coder scope', () => {
 		expect(afterDelete.currentTaskId).toBeNull();
 		expect(afterDelete.declaredCoderScope).toBeNull();
 	});
+
+	test('session.error and status-idle/error events do not revoke the scope', async () => {
+		const plugin = await bootKnowledgeHost(directory, {
+			hooks: { background_subagents: true },
+		});
+		await claimedActiveCoderBinding();
+
+		// Before the fix these event shapes reached the same teardown as
+		// session.deleted. They are not removals either: the binding and the
+		// task context must survive every one of them.
+		const nonRemovalEvents = [
+			{ type: 'session.error', properties: { sessionID: CHILD } },
+			{
+				type: 'session.status',
+				properties: { sessionID: CHILD, status: 'idle' },
+			},
+			{
+				type: 'session.status',
+				properties: { sessionID: CHILD, status: { type: 'idle' } },
+			},
+			{
+				type: 'session.status',
+				properties: { sessionID: CHILD, status: { type: 'error' } },
+			},
+		];
+		for (const event of nonRemovalEvents) {
+			await plugin.hooks.event({ event });
+			expect(
+				resolveAuthorizedScopeBindingForSession({
+					directory,
+					activeSessionId: CHILD,
+				}),
+				`${event.type} must not revoke the durable binding`,
+			).not.toBeNull();
+			const after = ensureAgentSession(CHILD, 'coder', directory);
+			expect(
+				after.currentTaskId,
+				`${event.type} must not detach the task context`,
+			).toBe(TASK);
+			expect(
+				after.declaredCoderScope,
+				`${event.type} must not clear the declared coder scope`,
+			).not.toBeNull();
+		}
+	});
+
+	test('session.removed revokes the binding and task context like session.deleted', async () => {
+		const plugin = await bootKnowledgeHost(directory, {
+			hooks: { background_subagents: true },
+		});
+		await claimedActiveCoderBinding();
+
+		await plugin.hooks.event({
+			event: {
+				type: 'session.removed',
+				properties: { sessionID: CHILD },
+			},
+		});
+		expect(
+			resolveAuthorizedScopeBindingForSession({
+				directory,
+				activeSessionId: CHILD,
+			}),
+		).toBeNull();
+		const afterRemoval = ensureAgentSession(CHILD, 'coder', directory);
+		expect(afterRemoval.currentTaskId).toBeNull();
+		expect(afterRemoval.declaredCoderScope).toBeNull();
+	});
 });

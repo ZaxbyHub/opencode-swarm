@@ -125,8 +125,8 @@ describe('retryable ingestion commits persist the failure reason', () => {
 		expect(storedReason!.length).toBeLessThanOrEqual(256);
 		expect(storedReason!.endsWith('...')).toBe(true);
 
-		// Attempt 2: the claim itself preserves the last reason (an expired
-		// lease without a commit keeps the previous verdict visible).
+		// Attempt 2: the claim itself carries the last reason forward — a
+		// new claimant sees the previous verdict without a new commit.
 		const claim2 = await claimDelegationIngestion(directory, CORR, {
 			claimantId: 'observer-2',
 		});

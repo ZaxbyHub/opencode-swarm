@@ -4448,10 +4448,13 @@ async function initializeOpenCodeSwarm(
 									// notification — 2.15/3.8/3.11 field incidents; idle without
 									// a background wait never tickled it, which is why it looked
 									// intermittent). Only true removal (session.deleted /
-									// session.removed) revokes scope. Abandoned bindings are
-									// still bounded by the 60-min scope-binding TTL, the
-									// dispatch lifecycle, and endAgentSession (close / lean
-									// runner). The v2 adapter already refuses to map live
+									// session.removed) revokes scope. An abandoned binding
+									// keeps its 60-min TTL in memory and is also ended by
+									// the dispatch lifecycle and endAgentSession (close /
+									// lean runner); on disk it stays live, and the same
+									// owner session can revive it for up to 24 h after
+									// lapse (each revival re-arms the 60-min TTL). The v2
+									// adapter already refuses to map live
 									// busy/retry to session.idle for the same class (#3022) —
 									// this closes the genuine-idle gap on the consumer side.
 									const isSessionRemoval =

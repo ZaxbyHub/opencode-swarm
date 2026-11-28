@@ -22,6 +22,7 @@ import {
 	resetSwarmState,
 	startReviewerScopeGeneration,
 } from '../../../src/state';
+import { safeRmRecursive } from '../../helpers/safe-test-dir.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const PARENT = 'ses-supersede-parent';
@@ -80,6 +81,7 @@ describe('superseded reviewer-scope generations — stale consumption', () => {
 
 	afterEach(() => {
 		resetSwarmState();
+		safeRmRecursive(directory);
 	});
 
 	test('a re-dispatch supersedes the older call: its completion consumes as terminal-negative stale', async () => {
