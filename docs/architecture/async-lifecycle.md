@@ -231,8 +231,8 @@ closeout: {
    claiming, and the sweep immunity ends, so the stale sweep flips an
    `ingestion_error` record after its timeout. The bound covers the ingestion
    claim loop only: a sweep-flipped record (new terminal event id) remains a
-   perpetual recovery candidate, re-driven and its record rewritten on every
-   maintenance pass (bounded per pass by `maxRecords`), exactly as before this
+   perpetual recovery candidate, re-driven on every maintenance pass (bounded per pass by `maxRecords`;
+   coder records are also rewritten on each pass), exactly as before this
    change.
 
 **Behavior on corrupted stores**

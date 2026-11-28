@@ -42,8 +42,8 @@ closeout step:
   stale workspace on replay) can never commit, so after
   `MAX_INGESTION_REDRIVE_ATTEMPTS` (5) failed claims the observer stops
   claiming, marks `ingestion_commit` failed with a visible reason (r14
-  terminally-closed semantics), closes `parent_advisory` and `context_map`
-  (when journaled), and the sweep immunity ends: once an `ingestion_error`
+  terminally-closed semantics), closes `parent_advisory` and `context_map`,
+  and the sweep immunity ends: once an `ingestion_error`
   record ages, the stale sweep flips it exactly as it did before this change
   (a record still in status `completed`, for example after repeated expired
   claims, is given up and leaves recovery but is not swept). A transient
@@ -51,8 +51,9 @@ closeout step:
   the task is the exit for an abandoned ingestion. The bound covers the
   ingestion claim loop only: the record leaves the recovery set once its other
   closeout steps are closed, and a sweep-flipped record (new terminal event
-  id) remains a perpetual recovery candidate, re-driven and its record
-  rewritten on every maintenance pass (bounded per pass by `maxRecords`) —
+  id) remains a perpetual recovery candidate, re-driven on every
+  maintenance pass (bounded per pass by `maxRecords`; coder records are also
+  rewritten on each pass) —
   existing behavior this change does not alter.
 - Compatibility: `ingestion_commit` is a new key in the strict closeout step
   schema, and every coder or gate-bearing record written by this release

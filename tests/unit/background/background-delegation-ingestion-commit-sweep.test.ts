@@ -194,6 +194,7 @@ describe('ingestion_commit sweep immunity and bounded re-drive (Layer 23)', () =
 			'abandoned',
 		);
 		expect(given?.closeout?.steps.parent_advisory?.state).toBe('completed');
+		expect(given?.closeout?.steps.context_map?.state).toBe('completed');
 		expect(
 			hasPendingTerminalCloseout(given as BackgroundDelegationRecord),
 		).toBe(false);

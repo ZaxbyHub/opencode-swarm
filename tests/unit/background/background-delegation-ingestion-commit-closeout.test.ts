@@ -169,8 +169,12 @@ describe('background delegation ingestion_commit closeout step (Layer 23)', () =
 		expect(record?.closeout?.steps.ingestion_commit?.state).toBe('completed');
 	});
 
-	test('crash between commit and ack — consumed-disposition replay acks the step without re-applying', async () => {
-		const seeded = await seedCoderRecord(directory, 'coder-crash-ack', '1.1');
+	/**
+	 * The crash point: the ingestion committed durably (consumed) but the
+	 * `ingestion_commit` ack never ran.
+	 */
+	async function seedCommittedButUnacked(correlationId: string) {
+		const seeded = await seedCoderRecord(directory, correlationId, '1.1');
 		const terminal = await claimAndSettleCoder(directory, seeded.correlationId);
 		await initializeTerminalCloseout(
 			directory,
@@ -186,8 +190,6 @@ describe('background delegation ingestion_commit closeout step (Layer 23)', () =
 				step,
 			);
 		}
-		// The crash point: the ingestion committed durably (consumed) but the
-		// step ack never ran.
 		const ingestion = await claimDelegationIngestion(
 			directory,
 			seeded.correlationId,
@@ -206,6 +208,12 @@ describe('background delegation ingestion_commit closeout step (Layer 23)', () =
 		expect(
 			hasPendingTerminalCloseout(crashed as BackgroundDelegationRecord),
 		).toBe(true);
+		return { seeded, crashed };
+	}
+
+	test('crash between commit and ack — consumed-disposition replay acks the step without re-applying', async () => {
+		const { seeded, crashed } =
+			await seedCommittedButUnacked('coder-crash-ack');
 
 		// "Without re-applying": the replay must take the consumed disposition —
 		// no new claim (attempt unchanged) and no ingestion commit call at all.
@@ -227,6 +235,30 @@ describe('background delegation ingestion_commit closeout step (Layer 23)', () =
 		expect(
 			hasPendingTerminalCloseout(record as BackgroundDelegationRecord),
 		).toBe(false);
+	});
+
+	test('the consumed-replay ack is journal-gated: with no journal this pass the step is not acked (r14 P0-2)', async () => {
+		const { seeded } = await seedCommittedButUnacked('coder-crash-no-journal');
+		const terminal = completedTerminal(seeded.correlationId);
+		let ingestionAcks = 0;
+		const observer = createBackgroundCompletionObserver({
+			config: { enabled: true },
+			directory,
+			// The journal cannot be established this pass: acking
+			// ingestion_commit would forge a stand-in journal and drop the
+			// record from recovery with its other steps never run.
+			initializeTerminalCloseoutImpl: async () => false,
+			markTerminalCloseoutStepCompletedImpl: async (...args) => {
+				if (args[3] === 'ingestion_commit') ingestionAcks++;
+				return markTerminalCloseoutStepCompleted(...args);
+			},
+		});
+		await observer.event(completedEvent(seeded.correlationId));
+
+		expect(ingestionAcks).toBe(0);
+		const record = findByCorrelationId(directory, seeded.correlationId);
+		expect(record?.closeout?.terminalEventId).toBe(terminal.eventId);
+		expect(record?.closeout?.steps.ingestion_commit?.state).toBe('pending');
 	});
 
 	test('a non-coder, non-gate record never gets an ingestion_commit step', async () => {
