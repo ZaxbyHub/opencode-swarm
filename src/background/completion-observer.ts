@@ -1534,8 +1534,8 @@ export function createBackgroundCompletionObserver(opts: {
 					// F-002: the bounded re-drive is spent (deterministic ingestion
 					// failure). Give up VISIBLY: mark ingestion_commit failed
 					// (r14 P0-2: terminally closed with a reason, so the record
-					// drops out of the recovery set), close the same steps the
-					// failed-apply arm below closes, and stop claiming — the record
+					// drops out of the recovery set), close parent_advisory and context_map
+					// (the failed-apply arm closes similar steps), stop claiming — the record
 					// then ages and the stale sweep regains authority over it.
 					// Journal-gated: without a journal this pass the give-up is
 					// deferred to recovery instead of forging a fragment journal.

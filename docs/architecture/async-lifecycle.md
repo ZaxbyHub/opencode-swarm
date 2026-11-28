@@ -227,11 +227,13 @@ closeout: {
    retryable ingestion. The re-drive is bounded by
    `MAX_INGESTION_REDRIVE_ATTEMPTS` claims (a transient failure is recovered
    only if it clears within that budget): past it the observer marks the step
-   `failed` (visible reason), stops claiming, and the sweep immunity ends, so
-   the stale sweep flips the record after its timeout. The record leaves the
-   recovery set only once its other closeout steps are closed too, and a
-   sweep-flipped record (new terminal event id) remains an inert recovery
-   candidate, exactly as before this change.
+   `failed` (visible reason), closes `parent_advisory`/`context_map`, stops
+   claiming, and the sweep immunity ends, so the stale sweep flips an
+   `ingestion_error` record after its timeout. The bound covers the ingestion
+   claim loop only: a sweep-flipped record (new terminal event id) remains a
+   perpetual recovery candidate, re-driven and its record rewritten on every
+   maintenance pass (bounded per pass by `maxRecords`), exactly as before this
+   change.
 
 **Behavior on corrupted stores**
 

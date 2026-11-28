@@ -18,6 +18,7 @@ import {
 	hasPendingTerminalCloseout,
 	isIngestionRedriveExhausted,
 	MAX_INGESTION_REDRIVE_ATTEMPTS,
+	markTerminalCloseoutStepFailed,
 	recordPendingDelegation,
 	sweepStaleDelegations,
 } from '../../../src/background/pending-delegations';
@@ -204,6 +205,39 @@ describe('ingestion_commit sweep immunity and bounded re-drive (Layer 23)', () =
 		expect(findByCorrelationId(directory, seeded.correlationId)?.status).toBe(
 			'stale',
 		);
+	});
+
+	test('the give-up is journal-gated: with no journal this pass nothing is marked failed (r14 P0-2) and the record stays sweepable', async () => {
+		const seeded = await seedCoderRecord(directory, 'coder-no-journal', '1.1');
+		await seedFailedIngestionState(
+			directory,
+			seeded.correlationId,
+			FULL_JOURNAL,
+			MAX_INGESTION_REDRIVE_ATTEMPTS,
+		);
+		let failedMarks = 0;
+		const observer = createBackgroundCompletionObserver({
+			config: { enabled: true },
+			directory,
+			// The journal cannot be established this pass: every journal-gated
+			// effect, including the give-up's failed mark, must be deferred to
+			// recovery instead of forging a fragment journal.
+			initializeTerminalCloseoutImpl: async () => false,
+			markTerminalCloseoutStepFailedImpl: async (...args) => {
+				failedMarks++;
+				return markTerminalCloseoutStepFailed(...args);
+			},
+		});
+		await observer.event(completedEvent(seeded.correlationId));
+
+		expect(failedMarks).toBe(0);
+		const record = findByCorrelationId(directory, seeded.correlationId);
+		expect(record?.ingestion?.attempt).toBe(MAX_INGESTION_REDRIVE_ATTEMPTS);
+		expect(record?.closeout?.steps.ingestion_commit?.state).toBe('pending');
+		// The exhausted budget ended the sweep immunity, so the record is not
+		// stuck: once it ages the sweep flips it.
+		await age();
+		expect(await sweepStaleDelegations(directory, 1)).toBe(1);
 	});
 
 	test('isIngestionRedriveExhausted — pure boundary cases', () => {
