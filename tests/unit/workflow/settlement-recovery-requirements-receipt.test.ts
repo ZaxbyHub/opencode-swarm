@@ -14,6 +14,7 @@
  * fail-closed behavior on a corrupt requirements chain.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { freezeClock, type Restore } from '../../helpers/test-clock.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { saveEvidence } from '../../../src/evidence/manager';
@@ -38,12 +39,16 @@ import {
 let directory = '';
 let cleanup = (): void => {};
 
+let restoreClock: Restore;
+
 beforeEach(() => {
+	restoreClock = freezeClock({ fixedNow: Date.now() });
 	resetSwarmState();
 	({ dir: directory, cleanup } = createSafeTestDir('settlement-receipt-'));
 });
 
 afterEach(() => {
+	restoreClock();
 	resetSwarmState();
 	cleanup();
 });

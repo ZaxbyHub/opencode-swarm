@@ -12,6 +12,7 @@
  * or rewound history and unverifiable cases stay stale (fail closed).
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { freezeClock, type Restore } from '../../helpers/test-clock.js';
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -117,7 +118,10 @@ async function writeReceiptAtCurrentHead(): Promise<void> {
 	});
 }
 
+let restoreClock: Restore;
+
 beforeEach(() => {
+	restoreClock = freezeClock({ fixedNow: Date.now() });
 	directory = canonicalMkdtemp('docs-ancestry-');
 	git('init', '-b', 'main');
 	git('config', 'user.email', 'test@example.com');
@@ -127,6 +131,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	restoreClock();
 	resetPhaseParticipationForTests();
 	fs.rmSync(directory, { recursive: true, force: true, maxRetries: 5 });
 });

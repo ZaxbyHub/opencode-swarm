@@ -13,9 +13,9 @@
  * authority whenever the persisted result has no body at all.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { createBackgroundCompletionObserver } from '../../../src/background/completion-observer';
 import {
@@ -42,8 +42,7 @@ function digest(text: string): string {
 }
 
 function makeTempProject(): string {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-bgobs-bodyless-'));
-	const real = fs.realpathSync(dir);
+	const real = canonicalMkdtemp('swarm-bgobs-bodyless-');
 	fs.mkdirSync(path.join(real, '.swarm'), { recursive: true });
 	return real;
 }

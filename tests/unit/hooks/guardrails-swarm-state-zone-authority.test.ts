@@ -13,8 +13,8 @@
  * .swarm/ prefix block) still holds.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 import * as fs from 'node:fs/promises';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { checkFileAuthority } from '../../../src/hooks/guardrails';
 
@@ -28,7 +28,7 @@ describe('guardrails swarm state-zone authority', () => {
 	let tempDir: string;
 
 	beforeEach(async () => {
-		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'swarm-state-zone-'));
+		tempDir = canonicalMkdtemp('swarm-state-zone-');
 	});
 
 	afterEach(async () => {

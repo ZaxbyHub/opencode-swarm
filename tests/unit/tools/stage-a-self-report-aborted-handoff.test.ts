@@ -20,6 +20,7 @@
  * (no mutation, ambiguity, out-of-scope files, WAL-less background rounds).
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { freezeClock, type Restore } from '../../helpers/test-clock.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { readCoreEvents } from '../../../src/events/core-events';
@@ -77,13 +78,17 @@ function routeEvents(directory: string): RouteEvent[] {
 
 let directory: string;
 
+let restoreClock: Restore;
+
 beforeEach(() => {
+	restoreClock = freezeClock({ fixedNow: Date.now() });
 	directory = canonicalMkdtemp('swarm-self-report-aborted-');
 	fs.mkdirSync(path.join(directory, '.swarm'), { recursive: true });
 	resetSwarmState();
 });
 
 afterEach(() => {
+	restoreClock();
 	resetSwarmState();
 	fs.rmSync(directory, { recursive: true, force: true, maxRetries: 5 });
 });

@@ -23,8 +23,9 @@ import {
 	setDefaultTimeout,
 	test,
 } from 'bun:test';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
+import { freezeClock, type Restore } from '../../helpers/test-clock.js';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import { seedStageBGates } from '../../helpers/task-workflow-evidence';
@@ -172,11 +173,12 @@ function writePlan(taskStatuses: Record<string, string>): void {
 	);
 }
 
+let restoreClock: Restore;
+
 beforeEach(() => {
+	restoreClock = freezeClock({ fixedNow: Date.now() });
 	resetSwarmState();
-	tempDir = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), 'phase-inference-')),
-	);
+	tempDir = canonicalMkdtemp('phase-inference-');
 	originalCwd = process.cwd();
 	process.chdir(tempDir);
 	fs.mkdirSync(path.join(tempDir, '.swarm', 'evidence'), { recursive: true });
@@ -190,6 +192,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	restoreClock();
 	process.chdir(originalCwd);
 	try {
 		fs.rmSync(tempDir, { recursive: true, force: true });

@@ -9,9 +9,9 @@
  * `.write-errors.jsonl` inside the store root, best-effort by contract.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { recordStageBDispatchBindings } from '../../../src/background/stage-b-dispatch-binding-store';
 import { _internals as atomicInternals } from '../../../src/utils/atomic-write';
@@ -23,9 +23,7 @@ const realAtomicRename = atomicInternals.renameSync;
 let dir: string;
 
 beforeEach(() => {
-	dir = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), 'sb-binding-diag-')),
-	);
+	dir = canonicalMkdtemp('sb-binding-diag-');
 	fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 });
 
