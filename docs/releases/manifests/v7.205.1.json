@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.205.1",
+  "tagCommit": "fb57396eff2162503ee6aafc2d46edfa92c075b2",
+  "targetCommitish": "fb57396eff2162503ee6aafc2d46edfa92c075b2",
+  "releaseBodySha256": "6407bb91a564bcb41d8065f626a2a80025371d830562ce2adfe28b8b3f06f13c",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/issue-3259-ci-wait-budget-40min-ceiling.md",
+      "sha256": "ba4a4ebbf3bcce4b709a479212185537e176e2690b5f8a3ef49be1fe30568b4a"
+    },
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/issue-3745-redaction-pin-archived-release-history.md",
+      "sha256": "c976e5b3d0126e7dcd2dc472ea725cb8f0c06930f2ab0d8a2447cc85568d3cc1"
+    }
+  ]
+}
