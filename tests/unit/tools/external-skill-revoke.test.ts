@@ -233,6 +233,10 @@ describe('external_skill_revoke', () => {
 		const updated = await store.get(candidate.id);
 		expect(updated).not.toBeNull();
 		expect(updated!.evaluation_verdict).toBe('revoked');
+		const revokeEntry = updated!.evaluation_history.find(
+			(entry) => entry.actor === 'user' && entry.verdict === 'revoked',
+		);
+		expect(revokeEntry?.reason).toContain('Skill file removed.');
 	});
 
 	// -------------------------------------------------------------------------
@@ -394,7 +398,7 @@ describe('external_skill_revoke', () => {
 		expect(revokeEntry!.reason).toContain(
 			'Revoked: Security vulnerability found',
 		);
-		expect(revokeEntry!.reason).toContain('Skill file removed.');
+		expect(revokeEntry!.reason).toContain('Skill file was already absent.');
 	});
 
 	// -------------------------------------------------------------------------
