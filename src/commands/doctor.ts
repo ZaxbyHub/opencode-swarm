@@ -419,6 +419,9 @@ export async function handleDoctorCommand(
 				(i) => i.status === 'collision',
 			).length;
 			const skipped = rollback.items.filter((i) => i.status === 'skipped');
+			const unresolved = rollback.items.filter(
+				(i) => i.status === 'unresolved',
+			);
 			output += '\n---\n\n## Residue Quarantine Rollback\n\n';
 			output += `Batch \`${neutralizeResidueName(rollback.batchRelDir)}\`: ${restored} restored, ${already} already restored`;
 			if (collisions > 0) {
@@ -427,11 +430,45 @@ export async function handleDoctorCommand(
 			if (skipped.length > 0) {
 				output += `, ${skipped.length} skipped (unsafe manifest name — entry left untouched)`;
 			}
-			output += rollback.drained
-				? rollback.batchDirRetained
-					? '. Batch fully drained; directory retained (unowned files present — nothing was deleted).\n'
-					: '. Batch fully drained and removed.\n'
-				: '. Batch retained (unresolved entries).\n';
+
+			output +=
+				rollback.batchDirRetentionReason === 'in-flight-batch'
+					? '. Batch still holds a stored copy — a concurrent quarantine wrote it, so the batch is neither drained nor restorable by this rollback; it needs manual recovery.\n'
+					: rollback.nothingToRestore
+						? rollback.batchDirRetained
+							? '. Nothing left to restore; the previously drained batch remains retained.\n'
+							: '. Nothing left to restore; the previously drained batch has been removed.\n'
+						: rollback.drained
+							? rollback.batchDirRetained
+								? rollback.batchDirRetentionReason === 'foreign-content'
+									? '. Batch fully drained; directory retained (unowned content present — every unowned file was preserved).\n'
+									: rollback.batchDirRetentionReason ===
+											'sibling-recovery-present'
+										? '. Batch fully drained; its metadata cleanup was skipped because a parent-sibling recovery manifest was present.\n'
+										: rollback.batchDirRetentionReason ===
+												'metadata-scan-failed'
+											? '. Batch fully drained; directory retained because its contents could not be enumerated.\n'
+											: rollback.batchDirRetentionReason ===
+													'owned-metadata-retained'
+												? '. Batch fully drained; its owned metadata was not removed; directory remains.\n'
+												: '. Batch fully drained; directory retained.\n'
+								: '. Batch fully drained and removed.\n'
+							: rollback.drainedMarkerWriteFailed
+								? '. Entries restored, but the retained batch could not be durably marked drained; explicit rollback may be needed.\n'
+								: rollback.items.length === 0 &&
+										(rollback.unsupportedBatches?.length ?? 0) > 0
+									? '. No compatible rollback was attempted; unsupported-version batches remain retained.\n'
+									: '. Batch retained (unresolved entries).\n';
+
+			// Unresolved entries carry the filesystem outcome and are bounded so
+			// every retained payload has an operator-visible, neutralized reason.
+			for (const item of unresolved.slice(0, 10)) {
+				const reasons = (item.reasons ?? []).map(neutralizeResidueName);
+				output += `- \`${neutralizeResidueName(item.relPath)}\` — unresolved (${reasons.join(', ') || 'unknown failure'})\n`;
+			}
+			if (unresolved.length > 10) {
+				output += `- … ${unresolved.length - 10} more unresolved\n`;
+			}
 			// Skipped entries (#3836): one bounded line each, with the
 			// neutralized name and its reason, so the operator sees exactly
 			// what stayed behind and why the batch was retained.
@@ -441,20 +478,45 @@ export async function handleDoctorCommand(
 			if (skipped.length > 10) {
 				output += `- … ${skipped.length - 10} more skipped\n`;
 			}
+			for (const batch of (rollback.unsupportedBatches ?? []).slice(0, 10)) {
+				output += `- unsupported quarantine batch \`${neutralizeResidueName(batch.batchId)}\`: unsupported manifest version ${neutralizeResidueName(batch.version)}; payload retained under .swarm/quarantine/${neutralizeResidueName(batch.batchId)}/ for recovery by a compatible plugin\n`;
+			}
+			if ((rollback.unsupportedBatches ?? []).length > 10) {
+				output += `- … ${(rollback.unsupportedBatches ?? []).length - 10} more unsupported-version batches\n`;
+			}
 			// Wedged batches skipped by default selection (#3951): their
 			// payload stays on disk for manual recovery — say so, bounded and
 			// neutralized, so the operator knows where it is.
+
 			for (const batch of (rollback.skippedBatches ?? []).slice(0, 10)) {
-				output += `- skipped wedged batch \`${neutralizeResidueName(batch)}\`: no readable manifest surface (manifest.json, manifest.recovery.json, <id>.recovery.json) — payload retained under .swarm/quarantine/${neutralizeResidueName(batch)}/ for manual recovery\n`;
+				output += `- skipped wedged batch \`${neutralizeResidueName(batch)}\`: no readable manifest surface (manifest.json, manifest.intent.json, manifest.recovery.json, <id>.recovery.json) — payload retained under .swarm/quarantine/${neutralizeResidueName(batch)}/ for manual recovery\n`;
 			}
 			const skippedBatchCount = (rollback.skippedBatches ?? []).length;
 			if (skippedBatchCount > 10) {
 				output += `- … ${skippedBatchCount - 10} more wedged batches skipped\n`;
 			}
 		} catch (err) {
-			// Error text can embed a manifest-derived path (validateRelPath's
-			// message) — neutralize before rendering (issue #3836 D3).
-			output += `\n❌ Residue quarantine rollback failed: ${neutralizeResidueName(err instanceof Error ? err.message : String(err))}\n`;
+			const unsupportedBatches = (
+				err as Error & {
+					unsupportedBatches?: Array<{ batchId: string; version: string }>;
+				}
+			).unsupportedBatches;
+			if (unsupportedBatches?.length) {
+				output += '\n---\n\n## Residue Quarantine Rollback\n\n';
+				output +=
+					'No compatible rollback was attempted; unsupported-version batches remain retained.\n';
+				for (const batch of unsupportedBatches.slice(0, 10)) {
+					const safeId = neutralizeResidueName(batch.batchId);
+					output += `- unsupported quarantine batch \`${safeId}\`: unsupported manifest version ${neutralizeResidueName(batch.version)}; payload retained under .swarm/quarantine/${safeId}/ for recovery by a compatible plugin\n`;
+				}
+				if (unsupportedBatches.length > 10) {
+					output += `- … ${unsupportedBatches.length - 10} more unsupported-version batches\n`;
+				}
+			} else {
+				// Error text can embed a manifest-derived path (validateRelPath's
+				// message) — neutralize before rendering (issue #3836 D3).
+				output += `\n❌ Residue quarantine rollback failed: ${neutralizeResidueName(err instanceof Error ? err.message : String(err))}\n`;
+			}
 		}
 	} else if (args.includes('--quarantine-residue')) {
 		try {

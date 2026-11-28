@@ -142,12 +142,14 @@ describe('rollbackResidueQuarantine per-entry skip-and-report (#3836 D1)', () =>
 		expect(existsSync(path.join(batchAbs, ...validRel.split('/')))).toBe(false);
 
 		// Retry: the resolved entry's stored copy was consumed by the first
-		// rollback, so the documented flip lands on 'missing-copy' here
-		// (nothing left to restore); the poisoned entry skips again (exactly
-		// once) and the batch stays retained.
+		// rollback, but the ORIGINAL is still present with the manifest's
+		// content, so the entry is already restored — reporting
+		// 'missing-copy' here would misreport a restored payload as lost
+		// (#3951 FB-102). The poisoned entry skips again (exactly once) and
+		// the batch stays retained.
 		const rb2 = await rollbackResidueQuarantine(projectDir, 'batch-c0');
 		expect(rb2.items.find((i) => i.relPath === validRel)?.status).toBe(
-			'missing-copy',
+			'already-restored',
 		);
 		expect(rb2.items.filter((i) => i.relPath.includes('poison'))).toHaveLength(
 			1,

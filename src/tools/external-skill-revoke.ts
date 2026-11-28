@@ -532,7 +532,7 @@ export const external_skill_revoke: ReturnType<typeof createSwarmTool> =
 					verdict: 'revoked' as const,
 					timestamp,
 					actor: 'user',
-					reason: `Revoked: ${reason}. Skill file removed.`,
+					reason: `Revoked: ${reason}. ${skillFileRemoved ? 'Skill file removed.' : 'Skill file was already absent.'}`,
 				};
 
 				// Update candidate: set verdict to revoked and append history.
@@ -581,12 +581,9 @@ export const external_skill_revoke: ReturnType<typeof createSwarmTool> =
 					skill_file_removed: skillFileRemoved,
 				});
 			} catch (err) {
-				// Dedicated refusal branch for the identity-guarded unlink
-				// (#3951 D4): the typed error's own message is the actionable
-				// refusal (file left in place, candidate left at its recorded
-				// verdict, no revoked audit entry written) — surfacing it under
-				// a generic "Failed to revoke" prefix would mislabel a
-				// deliberate refusal as an operational failure.
+				// Keep identity-guard refusals distinct from operational failures:
+				// callers need the candidate id and actionable refusal without a
+				// generic failure prefix.
 				if (err instanceof SkillFileDigestMismatchError) {
 					return JSON.stringify({
 						success: false,
@@ -595,6 +592,7 @@ export const external_skill_revoke: ReturnType<typeof createSwarmTool> =
 					});
 				}
 				const message = err instanceof Error ? err.message : 'Unknown error';
+
 				return JSON.stringify({
 					success: false,
 					error: `Failed to revoke candidate: ${message}`,

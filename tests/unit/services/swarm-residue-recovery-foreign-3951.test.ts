@@ -5,23 +5,24 @@
  * dropped into the batch dir blocks the cleanup and is preserved.
  *
  * Sibling of swarm-residue-recovery-3951.test.ts (FR-006 500-line cap).
- * Fault injection follows the node:fs spread-real pattern: the mock is
- * registered BEFORE the dynamic module import, only renameSync is
- * overridden, and every non-faulted rename delegates to the pre-captured
- * real function.
+ * Fault injection uses the residue-entry and atomic-write `_internals` seams;
+ * both are restored in finally so no node:fs namespace mock leaks between
+ * files in a shared Bun process.
  */
-import { afterEach, expect, mock, test } from 'bun:test';
+import { expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import * as realFs from 'node:fs';
 import * as path from 'node:path';
+import {
+	quarantineSwarmResidue,
+	_internals as residueInternals,
+} from '../../../src/services/swarm-residue.js';
+import { _internals as atomicWriteInternals } from '../../../src/utils/atomic-write.js';
 import { withFrozenClockAsync } from '../../helpers/test-clock.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
-// The node:fs mock is registered per test and restored inside each finally;
-// this hook is the check:mock-cleanup backstop so a thrown test cannot leak it.
-afterEach(() => {
-	mock.restore();
-});
+const realRenameResidueEntry = residueInternals.renameResidueEntry;
+const realAtomicRename = atomicWriteInternals.renameSync;
 
 /** Deterministic instant every clock read in this file is relative to. */
 const FIXED_NOW = 1_800_000_000_000;
@@ -52,57 +53,46 @@ test(
 				const old = new Date(FIXED_NOW - 2 * 60 * 60_000);
 				realFs.utimesSync(path.join(swarmRoot, tempRel), old, old);
 
-				const realRename = realFs.renameSync;
 				let planted = false;
-				await mock.module('node:fs', () => ({
-					...realFs,
-					renameSync: (from: string, to: string) => {
-						// (a) Plant FOREIGN files in the batch dir on the first forward
-						// move: one plain-named, one wearing the .tmp suffix (round-2
-						// review: a bare *.tmp must NOT be treated as owned metadata).
-						if (
-							!planted &&
-							to.includes(`${path.sep}quarantine${path.sep}`) &&
-							!to.endsWith('manifest.json')
-						) {
-							planted = true;
-							realFs.writeFileSync(
-								path.join(path.dirname(to), FOREIGN),
-								'foreign',
-								'utf-8',
-							);
-							realFs.writeFileSync(
-								path.join(path.dirname(to), FOREIGN_TMP),
-								'foreign-tmp',
-								'utf-8',
-							);
-						}
-						// (b) Break the manifest publish: a DIRECTORY named manifest.json
-						// makes the atomic rename fail (the frozen C5 injection class) —
-						// throw like the real EPERM so atomic-write surfaces the failure.
-						if (
-							to.endsWith('manifest.json') &&
-							!from.endsWith('manifest.json')
-						) {
-							realFs.mkdirSync(to, { recursive: true });
-							throw Object.assign(
-								new Error(
-									`EPERM: operation not permitted, rename '${from}' -> '${to}'`,
-								),
-								{
-									code: 'EPERM',
-								},
-							);
-						}
-						return realRename(from, to);
-					},
-				}));
+				residueInternals.renameResidueEntry = (from: string, to: string) => {
+					// (a) Plant FOREIGN files in the batch dir on the first forward
+					// move: one plain-named, one wearing the .tmp suffix (round-2
+					// review: a bare *.tmp must NOT be treated as owned metadata).
+					if (!planted && to.includes(`${path.sep}quarantine${path.sep}`)) {
+						planted = true;
+						realFs.writeFileSync(
+							path.join(path.dirname(to), FOREIGN),
+							'foreign',
+							'utf-8',
+						);
+						realFs.writeFileSync(
+							path.join(path.dirname(to), FOREIGN_TMP),
+							'foreign-tmp',
+							'utf-8',
+						);
+					}
+					realRenameResidueEntry(from, to);
+				};
+				atomicWriteInternals.renameSync = (from: string, to: string) => {
+					// (b) Break the manifest publish: a DIRECTORY named manifest.json
+					// makes the atomic rename fail (the frozen C5 injection class).
+					// Throw EPERM on every retry attempt so the bounded retry cannot
+					// recover and the compensation path is exercised.
+					if (to.endsWith('manifest.json') && !from.endsWith('manifest.json')) {
+						realFs.mkdirSync(to, { recursive: true });
+						throw Object.assign(
+							new Error(
+								`EPERM: operation not permitted, rename '${from}' -> '${to}'`,
+							),
+							{ code: 'EPERM' },
+						);
+					}
+					return realAtomicRename(from, to);
+				};
 
 				try {
-					const { quarantineSwarmResidue } = await import(
-						'../../../src/services/swarm-residue.js'
-					);
 					let threw = false;
+
 					try {
 						await quarantineSwarmResidue(tmp, { trigger: 'close' });
 					} catch {
@@ -134,7 +124,8 @@ test(
 						realFs.readFileSync(path.join(swarmRoot, tempRel), 'utf-8'),
 					).toBe('partial');
 				} finally {
-					await mock.module('node:fs', () => ({ ...realFs }));
+					residueInternals.renameResidueEntry = realRenameResidueEntry;
+					atomicWriteInternals.renameSync = realAtomicRename;
 					realFs.rmSync(tmp, { recursive: true, force: true });
 				}
 			},

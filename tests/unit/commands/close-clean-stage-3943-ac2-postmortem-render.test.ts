@@ -43,12 +43,17 @@ const CONTROL = new RegExp(
 // Caller-provided readdir-sourced artifact name carrying STX (C0) and DEL.
 const EVIL_NAME = `post-mortem-a${cc(0x02)}b${cc(0x7f)}c.md`;
 
+// Capture both values before registration: mock.module rewrites the live
+// namespace, so fallthrough through realFs.promises would recurse into itself.
+const REAL_PROMISES = realFs.promises;
+const REAL_UNLINK = REAL_PROMISES.unlink;
+
 // Register the mock BEFORE clean-stage loads; spread the REAL module captured
 // above and override ONLY promises.unlink (everything else delegates real).
 mock.module('node:fs', () => ({
 	...realFs,
 	promises: {
-		...realFs.promises,
+		...REAL_PROMISES,
 		unlink: async (target: string): Promise<void> => {
 			if (target.endsWith(EVIL_NAME)) {
 				const err = new Error(
@@ -57,7 +62,7 @@ mock.module('node:fs', () => ({
 				err.code = 'EPERM';
 				throw err;
 			}
-			return realFs.promises.unlink(target);
+			return REAL_UNLINK(target);
 		},
 	},
 }));
@@ -65,6 +70,11 @@ mock.module('node:fs', () => ({
 const { runCleanStage } = await import(
 	'../../../src/commands/close/clean-stage.js'
 );
+const { _internals: closeStageInternals } = await import(
+	'../../../src/commands/close/internals.js'
+);
+const REAL_UNLINK_ACTIVE_STATE =
+	closeStageInternals.unlinkActiveStateFileWithRetry;
 
 describe('close clean-stage post-mortem cleanup warning — regression: raw control bytes rendered from the archive-sourced name and unlink failure (#3943 AC2)', () => {
 	let tmpDir: string;
@@ -75,6 +85,70 @@ describe('close clean-stage post-mortem cleanup warning — regression: raw cont
 		mock.restore();
 		if (tmpDir) {
 			realFs.rmSync(tmpDir, { recursive: true, force: true });
+		}
+	});
+
+	test('the active-state cleanup failure warning carries no control byte either', async () => {
+		tmpDir = canonicalMkdtemp('ac2-activestate-render-');
+		const swarmDir = path.join(tmpDir, '.swarm');
+		realFs.mkdirSync(swarmDir, { recursive: true });
+
+		// The active-state cleanup catch is the THIRD clean-stage render site
+		// (#3943's defect-class sweep sibling). Its artifact name is a constant,
+		// but the OS error text is interpolated — so the error MESSAGE is the
+		// carrier. Force a non-ENOENT failure whose message carries control
+		// bytes and assert the rendered warning is control-free.
+		closeStageInternals.unlinkActiveStateFileWithRetry = (async (
+			filePath: string,
+		): Promise<void> => {
+			if (filePath.endsWith('dark-matter.md')) {
+				const err = new Error(
+					`EPERM: operation not permitted, unlink '${filePath}' ${cc(0x02)}${cc(0x7f)}`,
+				) as NodeJS.ErrnoException;
+				err.code = 'EPERM';
+				throw err;
+			}
+			return REAL_UNLINK_ACTIVE_STATE(filePath);
+		}) as typeof REAL_UNLINK_ACTIVE_STATE;
+
+		try {
+			const ctx = {
+				directory: tmpDir,
+				swarmDir,
+				warnings: [] as string[],
+				// 'dark-matter.md' is claimed as ARCHIVED, so the clean stage
+				// unlinks it — that is the site-298 render path.
+				archivedActiveStateFiles: new Set<string>([
+					EVIL_NAME,
+					'dark-matter.md',
+				]),
+				archivedActiveStateDirs: new Set<string>(),
+				archiveFailureReasons: new Map(),
+				projectName: 'ac2',
+				isForced: false,
+				planAlreadyDone: true,
+			} as unknown as Parameters<typeof runCleanStage>[0];
+
+			await expect(runCleanStage(ctx)).resolves.toBeDefined();
+
+			const warning = ctx.warnings.find(
+				(w) =>
+					w.startsWith('Failed to clean active-state file ') &&
+					w.includes('dark-matter.md'),
+			);
+			expect(
+				warning,
+				'expected the active-state cleanup-failure warning to be emitted',
+			).toBeDefined();
+			expect(
+				CONTROL.test(warning!),
+				`the active-state cleanup warning carried a control byte: ${JSON.stringify(warning)}`,
+			).toBe(false);
+			// The diagnostic survives neutralization.
+			expect(warning!).toContain('EPERM');
+		} finally {
+			closeStageInternals.unlinkActiveStateFileWithRetry =
+				REAL_UNLINK_ACTIVE_STATE;
 		}
 	});
 
@@ -96,6 +170,7 @@ describe('close clean-stage post-mortem cleanup warning — regression: raw cont
 		} as unknown as Parameters<typeof runCleanStage>[0];
 
 		await expect(runCleanStage(ctx)).resolves.toBeDefined();
+		expect(ctx.warnings.join('\n')).not.toContain('Maximum call stack');
 
 		const warning = ctx.warnings.find(
 			(w) =>

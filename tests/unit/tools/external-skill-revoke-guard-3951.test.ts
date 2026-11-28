@@ -20,14 +20,10 @@
  * gap the in-code comment at 508-519 states honestly. Deterministic by
  * construction (one phase flag; no timing).
  *
- * Deviation recorded, not blessed: the plan's D4 wording says the tool
- * "catches SkillFileDigestMismatchError → returns the existing refusal payload
- * shape". The implementation lets the typed refusal fall through the generic
- * catch (external-skill-revoke.ts:565-571), so the operator-visible string is
- * `Failed to revoke candidate: Refusing to remove the promoted skill file…`
- * rather than a dedicated refusal branch. The OBSERVABLE contract the AC
- * requires is unchanged and is what this file asserts: success:false, NO
- * unlink, NO store.update, NO revoked audit entry.
+ * The tool has a dedicated SkillFileDigestMismatchError refusal branch
+ * (external-skill-revoke.ts), which returns the candidate id and the actionable
+ * refusal message without the generic "Failed to revoke candidate" prefix.
+ * These checks pin that result shape as well as the no-unlink/no-update contract.
  */
 
 import { afterEach, describe, expect, test } from 'bun:test';
@@ -209,12 +205,16 @@ describe('external_skill_revoke identity-guarded unlink (#3951 AC6 / D4)', () =>
 						),
 					) as {
 						success?: boolean;
+						candidate_id?: string;
 						error?: string;
 						skill_file_removed?: boolean;
 					};
 
 					expect(swapped, 'precondition: the swap fired in the gap').toBe(true);
 					expect(ack.success).toBe(false);
+					expect(ack.candidate_id).toBe(id);
+					expect(ack.error ?? '').not.toContain('Failed to revoke candidate');
+
 					expect(
 						ack.skill_file_removed,
 						'no removal is claimed',
@@ -284,6 +284,12 @@ describe('external_skill_revoke identity-guarded unlink (#3951 AC6 / D4)', () =>
 					const record = await readRecord(tmpDir, id);
 					expect(record?.evaluation_verdict).toBe('revoked');
 					expect(revokedAuditCount(record)).toBe(1);
+					const revokeEntry = record?.evaluation_history.find(
+						(entry) => entry.actor === 'user' && entry.verdict === 'revoked',
+					);
+					expect(revokeEntry?.reason).toBe(
+						'Revoked: guard enoent. Skill file was already absent.',
+					);
 				},
 				{ fixedNow: FIXED_NOW },
 			),
@@ -292,6 +298,7 @@ describe('external_skill_revoke identity-guarded unlink (#3951 AC6 / D4)', () =>
 
 	test(
 		'guard-level non-regular target: refusal with the read reason, the directory stays, nothing is revoked',
+
 		() =>
 			withFrozenClockAsync(
 				async () => {

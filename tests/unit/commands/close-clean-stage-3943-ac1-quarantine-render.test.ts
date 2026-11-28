@@ -105,18 +105,24 @@ describe('close clean-stage quarantine-failure warning — regression: raw contr
 			'expected the quarantine-failure warning (catch at clean-stage.ts:485-494) to be emitted',
 		).toBeDefined();
 
-		// Anti-removal guard: neutralization must not be "fixed" by dropping
-		// the diagnostic. The stable prefix and a rendering of the failing
-		// candidate survive.
-		expect(warning!).toContain('Atomic-write residue quarantine failed');
-		expect(warning!).toContain('res');
-		expect(warning!).toContain('.tmp');
-
-		// AC1 core: the operator warning carries no C0/DEL/C1 byte.
+		// AC1 core: the operator warning carries no C0/DEL/C1 byte. This
+		// assertion comes FIRST so that at the base revision it is the one that
+		// fails — the frozen check's expected base signature is the control-byte
+		// failure, and the anti-removal assertions below would otherwise fail
+		// first and hide it.
 		expect(
 			CONTROL.test(warning!),
 			`warning still carries raw control bytes: ${JSON.stringify(warning)}`,
 		).toBe(false);
+
+		// Anti-removal guard: neutralization must not be "fixed" by dropping
+		// the diagnostic. The stable prefix and a rendering of the failing
+		// candidate survive.
+		expect(warning!).toContain('Atomic-write residue quarantine failed');
+		// This control-free fragment only appears when the candidate name survives
+		// interpolation and neutralization; the warning prefix itself is not enough.
+		expect(warning!).toContain('quarantinees[2Kid-abc.tmp');
+		expect(warning!).toContain('.tmp');
 
 		// AC1 core, persisted surface: handleCloseCommand writes each warning
 		// verbatim as `- ${w}` under the `## Warnings` heading of
