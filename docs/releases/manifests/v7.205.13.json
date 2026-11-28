@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.205.13",
+  "tagCommit": "2ec2b05fdf9970d2e259f91363bb636efc428632",
+  "targetCommitish": "2ec2b05fdf9970d2e259f91363bb636efc428632",
+  "releaseBodySha256": "c07fce7b467fb31740cd7bdaae53c56c69184d8bc2f61eb09da5bff91f2af54f",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/3935-swarm-pr-feedback-issue-bodies-as-data.md",
+      "sha256": "1cf83c00eae05258d5bb03ea63ff309b2ba77c458426161b6f95812cd7c9c8da"
+    },
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/background-directory-scope-attribution.md",
+      "sha256": "6a5fbd9621a6a7612f2dbc0a9ce490e82c39abc1af5e4c11711bc1ae623fb065"
+    }
+  ]
+}
