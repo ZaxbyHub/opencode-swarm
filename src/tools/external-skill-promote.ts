@@ -38,6 +38,72 @@ import { createSwarmTool } from './create-tool.js';
 // DI Seam — _internals
 // ---------------------------------------------------------------------------
 
+/** Marker read bound — mirrors the propagation gate's MAX_MARKER_BYTES class. */
+const LIFECYCLE_MARKER_MAX_BYTES = 8_192;
+
+/**
+ * Pre-write lifecycle-marker predicate for an EMPTIED slug directory (#3951
+ * NF-3). Pure read: never mutates the marker, SKILL.md, or the store. The
+ * propagation gate refuses a skill whose directory carries a `retired.marker`
+ * or `stale.marker` BEFORE digest verification, so promoting into such a
+ * directory would produce an artifact the gate can never accept. Marker read
+ * anomalies (missing stat, symlink, oversize) fail CLOSED to the refusal with
+ * the read reason — a governance signal we cannot read is treated as present.
+ */
+async function readLifecycleMarkerState(
+	slugDir: string,
+): Promise<{ blocked: boolean; diagnostic?: string }> {
+	const markers: Array<{
+		name: 'retired.marker' | 'stale.marker';
+		kind: 'retired' | 'stale';
+	}> = [
+		{ name: 'retired.marker', kind: 'retired' },
+		{ name: 'stale.marker', kind: 'stale' },
+	];
+	const found: Array<{ kind: 'retired' | 'stale'; path: string }> = [];
+	for (const marker of markers) {
+		const markerPath = path.join(slugDir, marker.name);
+		try {
+			const st = await fs.lstat(markerPath);
+			if (!st.isFile()) {
+				return {
+					blocked: true,
+					diagnostic: `Refusing to promote: lifecycle marker '${marker.name}' at ${markerPath} is not a regular file — resolve the marker state (or promote under a different slug) before promoting into this directory.`,
+				};
+			}
+			if (st.size > LIFECYCLE_MARKER_MAX_BYTES) {
+				return {
+					blocked: true,
+					diagnostic: `Refusing to promote: lifecycle marker '${marker.name}' at ${markerPath} is ${st.size} bytes, above the ${LIFECYCLE_MARKER_MAX_BYTES}-byte marker bound — resolve the marker state (or promote under a different slug) before promoting into this directory.`,
+				};
+			}
+			await fs.readFile(markerPath, 'utf-8'); // readability probe
+			found.push({ kind: marker.kind, path: markerPath });
+		} catch (err) {
+			const code = (err as NodeJS.ErrnoException)?.code;
+			if (code === 'ENOENT') continue;
+			return {
+				blocked: true,
+				diagnostic: `Refusing to promote: lifecycle marker '${marker.name}' at ${markerPath} could not be read (${code ?? 'unknown error'}) — resolve the marker state (or promote under a different slug) before promoting into this directory.`,
+			};
+		}
+	}
+	if (found.length === 0) return { blocked: false };
+	const retired = found.find((m) => m.kind === 'retired');
+	if (retired) {
+		const staleCompanion = found.find((m) => m.kind === 'stale');
+		return {
+			blocked: true,
+			diagnostic: `Refusing to promote: slug directory ${slugDir} was retired and then emptied — the retirement marker ${retired.path} still blocks the propagation gate for any new skill written here. Delete ${retired.path} to unretire the slug${staleCompanion ? ` (and the stale marker ${staleCompanion.path})` : ''}, or promote under a different slug.`,
+		};
+	}
+	const stale = found[0]!;
+	return {
+		blocked: true,
+		diagnostic: `Refusing to promote: slug directory ${slugDir} was marked stale and then emptied — the staleness marker ${stale.path} still blocks the propagation gate for any new skill written here. Delete ${stale.path} (staleness re-evaluates on the next regeneration sweep), or promote under a different slug.`,
+	};
+}
+
 export const _internals = {
 	loadConfig: (directory: string): ExternalSkillsConfig | undefined => {
 		const pluginConfig = loadPluginConfig(directory);
@@ -667,6 +733,25 @@ export const external_skill_promote: ReturnType<typeof createSwarmTool> =
 					return JSON.stringify({
 						success: false,
 						error: `Skill '${sanitizedSlug}' already exists at ${targetPath}. Use a different slug or retire the existing skill first.`,
+					});
+				}
+
+				// Lifecycle-marker gate (#3951 NF-3): a retired/stale marker left
+				// in an EMPTIED slug (retireSkill keeps SKILL.md, so a present
+				// skill hit the collision gate above; only an explicit revoke
+				// leaves the marker alone in the directory) would make this
+				// promotion succeed while the propagation gate refuses the new
+				// skill on the marker BEFORE digest verification — an unusable
+				// artifact. Refuse BEFORE any mutation with a marker-specific
+				// remedy; retirement stays reversible for skills still present
+				// (they never reach this branch — #1822 contract untouched).
+				const markerState = await readLifecycleMarkerState(
+					path.dirname(targetPath),
+				);
+				if (markerState.blocked) {
+					return JSON.stringify({
+						success: false,
+						error: markerState.diagnostic,
 					});
 				}
 

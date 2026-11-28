@@ -26,6 +26,7 @@ import type {
 	ExternalSkillCandidate,
 	ExternalSkillCandidateEvaluationVerdict,
 } from '../config/schema';
+import { withEvidenceLock } from '../evidence/lock';
 import { atomicWriteFile } from '../evidence/task-file';
 
 // ---------------------------------------------------------------------------
@@ -399,6 +400,28 @@ export function createExternalSkillStore(
 			return null;
 		}
 
+		// Per-candidate mutual exclusion (#3951 AC1): update() is an unlocked
+		// read-merge-write — two overlapping updates on one record both read
+		// the same snapshot and the last writer silently discards the other's
+		// acknowledged fields. The store's records live under
+		// `<directory>/.swarm/skills/candidates/`, so the repo's shared
+		// `.swarm`-relative lock primitive (withEvidenceLock, bounded wait +
+		// stale-holder recovery; non-evidence reuse precedent:
+		// evidence/immutable-store.ts relativeLockPath) serializes the whole
+		// RMW. A lock timeout surfaces as an explicit failure — callers
+		// either land both acknowledged mutations or the conflicting one
+		// fails loudly; a lost update is never acknowledged.
+		return withCandidateLock(id, () =>
+			updateLocked(id, filePath, patch, options),
+		);
+	}
+
+	async function updateLocked(
+		id: string,
+		filePath: string,
+		patch: ExternalSkillCandidatePatch,
+		options?: UpdateOptions,
+	): Promise<ExternalSkillCandidate | null> {
 		const existing = await get(id);
 		if (existing === null) {
 			return null;
@@ -432,6 +455,15 @@ export function createExternalSkillStore(
 			return false;
 		}
 
+		// Same per-candidate lock as update() (#3951): without it, an
+		// acknowledged delete can be followed by an in-flight update's stale
+		// write that RESURRECTS the record. The unlink is inlined under the
+		// lock (not routed through the public locked deleteCandidate) so
+		// eviction below never re-enters the same non-reentrant lock.
+		return withCandidateLock(id, () => deleteLocked(filePath));
+	}
+
+	async function deleteLocked(filePath: string): Promise<boolean> {
 		try {
 			await _internals.fs.unlink(filePath);
 			return true;
@@ -441,6 +473,25 @@ export function createExternalSkillStore(
 			}
 			throw err;
 		}
+	}
+
+	/**
+	 * `.swarm`-relative lock key for one candidate record — the shared
+	 * withEvidenceLock primitive keys its lock files by this path
+	 * (`<directory>/.swarm/locks/<sha256>.lck` via src/parallel/file-locks.ts),
+	 * so update() and delete() on the same record serialize against each
+	 * other and across processes. `assertProjectRoot` accepts the store's
+	 * project root (`.swarm` itself is the boundary marker), keeping
+	 * temp-fixture stores working.
+	 */
+	function withCandidateLock<T>(id: string, fn: () => Promise<T>): Promise<T> {
+		return withEvidenceLock(
+			directory,
+			`skills/candidates/${id}.json`,
+			'external-skill-store',
+			id,
+			fn,
+		);
 	}
 
 	// ---- evictIfNeeded -----------------------------------------------------
@@ -463,7 +514,20 @@ export function createExternalSkillStore(
 		let evicted = 0;
 
 		for (const candidate of toEvict) {
-			const deleted = await deleteCandidate(candidate.id);
+			// Verdict re-validation under the victim's lock (#3951): the list
+			// above is a snapshot — a verdict that became protected between
+			// listing and eviction must abort THAT victim's eviction (skip to
+			// the next candidate; never delete a protected record). The unlink
+			// is inlined under the same lock rather than calling the public
+			// locked deleteCandidate (no reentrant acquisition).
+			const deleted = await withCandidateLock(candidate.id, async () => {
+				const current = await get(candidate.id);
+				if (current === null) return false;
+				if (!EVICTABLE_VERDICTS.has(current.evaluation_verdict)) {
+					return false;
+				}
+				return deleteLocked(candidateFilePath(storePath, candidate.id)!);
+			});
 			if (deleted) {
 				evicted++;
 			}

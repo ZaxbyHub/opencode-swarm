@@ -59,8 +59,59 @@ export const _internals = {
 			return { kind: 'error', code };
 		}
 	},
-	retireSkillFile: async (filePath: string): Promise<boolean> => {
+	retireSkillFile: async (
+		filePath: string,
+		options?: { expectedDigest?: string | null },
+	): Promise<boolean> => {
 		const { unlink } = await import('node:fs/promises');
+		// Identity guard AT the destructive step (#3951 AC6): the caller's
+		// earlier digest verification can be stale by the time the unlink
+		// lands (a concurrent revoke can vacate the slug and a different
+		// approved candidate can be promoted into it through the normal
+		// exclusive-create path). When an expected digest is supplied, the
+		// bounded read + hash happens immediately before the unlink and a
+		// mismatch refuses the removal — the replacement file stays in place.
+		// The success-path result contract is unchanged (true = removed,
+		// false = was-missing/ENOENT); the refusal is a typed error, so
+		// existing boolean wrappers keep compiling and forwarding wrappers
+		// let it propagate. The residual hash→unlink gap inside this helper
+		// remains honestly non-atomic (same stance as the in-code comment at
+		// the call site — narrowed, not eliminated).
+		if (typeof options?.expectedDigest === 'string') {
+			// FB-210 semantics: only a MISSING file skips the digest check —
+			// and under the guard, absence is TERMINAL (round-3 review): an
+			// absent observation must not authorize a later unlink, because a
+			// replacement created after the probe would be deleted unverified.
+			// The idempotent false is returned directly; true stays reserved
+			// for a verified removal.
+			const probe = await _internals.lstatTarget(filePath);
+			if (probe.kind === 'file') {
+				const guard = await readTargetBounded(
+					filePath,
+					PROMOTED_ARTIFACT_MAX_BYTES,
+				);
+				if (!guard.ok) {
+					throw new SkillFileDigestMismatchError(
+						`Refusing to remove the promoted skill file at ${filePath}: it could not be read for the pre-removal identity check (${guard.reason}). File left in place; candidate left at its recorded verdict.`,
+						{ observed: `<${guard.reason}>`, expected: options.expectedDigest },
+					);
+				}
+				const digest = computeArtifactDigest(guard.content);
+				if (digest !== options.expectedDigest) {
+					throw new SkillFileDigestMismatchError(
+						`Refusing to remove the promoted skill file at ${filePath}: its content no longer matches the recorded promoted digest (a replacement may have been promoted into the vacated slug). File left in place; candidate left at its recorded verdict.`,
+						{ observed: digest, expected: options.expectedDigest },
+					);
+				}
+			} else if (probe.kind === 'missing') {
+				return false;
+			} else {
+				throw new SkillFileDigestMismatchError(
+					`Refusing to remove the promoted skill file at ${filePath}: the pre-removal identity check found ${probe.kind === 'error' ? `an inspection error (${probe.code ?? 'unknown'})` : `a ${probe.kind}`} instead of a regular file. File left in place; candidate left at its recorded verdict.`,
+					{ observed: `<${probe.kind}>`, expected: options.expectedDigest },
+				);
+			}
+		}
 		try {
 			await unlink(filePath);
 			return true;
@@ -71,6 +122,26 @@ export const _internals = {
 		}
 	},
 };
+
+/**
+ * Typed refusal thrown by the identity-guarded unlink (#3951 AC6). Throwing
+ * (rather than returning a result union) keeps `_internals.retireSkillFile`'s
+ * `Promise<boolean>` contract intact for every existing caller and test
+ * double, while letting seam wrappers forward the refusal untouched.
+ */
+export class SkillFileDigestMismatchError extends Error {
+	readonly observedDigest: string;
+	readonly expectedDigest: string;
+	constructor(
+		message: string,
+		digests: { observed: string; expected: string },
+	) {
+		super(message);
+		this.name = 'SkillFileDigestMismatchError';
+		this.observedDigest = digests.observed;
+		this.expectedDigest = digests.expected;
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Disabled message (shared across all external-skill stubs)
@@ -444,8 +515,16 @@ export const external_skill_revoke: ReturnType<typeof createSwarmTool> =
 				// not claim atomicity we cannot provide on any supported
 				// platform; the generated-skill root is assumed single-writer
 				// during a revoke.
-				const skillFileRemoved =
-					await _internals.retireSkillFile(lexicalTarget);
+				// Identity-guarded removal (#3951 AC6): pass the SAME recorded
+				// digest verified above so the guard inside retireSkillFile can
+				// refuse when the file at the lexical path is no longer the
+				// verified bytes (delayed-revoke/replacement interleaving).
+				// A refusal returns BEFORE any record mutation — no revoked
+				// audit entry is written for a file we did not remove.
+				const skillFileRemoved = await _internals.retireSkillFile(
+					lexicalTarget,
+					{ expectedDigest: recordedHash },
+				);
 
 				// Build audit record
 				const timestamp = _internals.getTimestamp();
@@ -453,23 +532,67 @@ export const external_skill_revoke: ReturnType<typeof createSwarmTool> =
 					verdict: 'revoked' as const,
 					timestamp,
 					actor: 'user',
-					reason: `Revoked: ${reason}. Skill file removed.`,
+					reason: `Revoked: ${reason}. ${skillFileRemoved ? 'Skill file removed.' : 'Skill file was already absent.'}`,
 				};
 
-				// Update candidate: set verdict to revoked and append history
-				const updated = await store.update(candidateId, {
-					evaluation_verdict: 'revoked',
-					evaluation_history: [historyEntry],
-				});
+				// Update candidate: set verdict to revoked and append history.
+				// Partial-failure contract (#3951): the destructive unlink has
+				// already happened, so an update failure here must surface an
+				// honest partial state (file removed, record still promoted)
+				// with a re-run remedy — never a silent loss and never a
+				// blanket "failed" that hides what DID happen.
+				let updated: ExternalSkillCandidate | null;
+				try {
+					updated = await store.update(candidateId, {
+						evaluation_verdict: 'revoked',
+						evaluation_history: [historyEntry],
+					});
+				} catch (updateErr) {
+					const updateMessage =
+						updateErr instanceof Error ? updateErr.message : String(updateErr);
+					return JSON.stringify({
+						success: false,
+						candidate_id: candidateId,
+						// Round-3 review: report the OBSERVED removal outcome,
+						// not an unconditional true — a refused/missing removal
+						// that also fails its record update is a refusal state,
+						// not a removed-file state.
+						skill_file_removed: skillFileRemoved,
+						error: `Skill file removal outcome: ${skillFileRemoved ? 'removed' : 'not removed (absent or refused)'}; the candidate record update failed: ${updateMessage}. Re-run revoke to complete the record update (the file removal is idempotent).`,
+					});
+				}
+				if (updated === null) {
+					// Round-3 review: the record vanished mid-revoke (concurrent
+					// delete won). The file outcome stands; there is no record
+					// left to stamp — report it honestly instead of
+					// dereferencing null through the generic failure handler.
+					return JSON.stringify({
+						success: false,
+						candidate_id: candidateId,
+						skill_file_removed: skillFileRemoved,
+						error: `Skill file removal outcome: ${skillFileRemoved ? 'removed' : 'not removed (absent or refused)'}; the candidate record no longer exists (concurrent deletion?) — no audit record to update.`,
+					});
+				}
 
 				return JSON.stringify({
 					success: true,
-					candidate_id: updated!.id,
+					candidate_id: updated.id,
 					evaluation_verdict: 'revoked',
 					skill_file_removed: skillFileRemoved,
 				});
 			} catch (err) {
+				// Keep identity-guard refusals distinct from operational failures:
+				// callers need the candidate id and actionable refusal without a
+				// generic failure prefix.
+				if (err instanceof SkillFileDigestMismatchError) {
+					return JSON.stringify({
+						success: false,
+						candidate_id: candidateId,
+						error: err.message,
+					});
+				}
 				const message = err instanceof Error ? err.message : 'Unknown error';
+
 				return JSON.stringify({
 					success: false,
 					error: `Failed to revoke candidate: ${message}`,
