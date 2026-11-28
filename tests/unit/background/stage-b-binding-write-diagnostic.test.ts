@@ -9,12 +9,12 @@
  * `.write-errors.jsonl` inside the store root, best-effort by contract.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { canonicalMkdtemp } from '../../helpers/tmpdir';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { recordStageBDispatchBindings } from '../../../src/background/stage-b-dispatch-binding-store';
 import { _internals as atomicInternals } from '../../../src/utils/atomic-write';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const SESSION = 'ses_diagnostic00000000000000000';
 const CALL = 'call_diagnostic0000000000000000';

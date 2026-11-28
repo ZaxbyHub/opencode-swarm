@@ -14,7 +14,6 @@
  * fail-closed behavior on a corrupt requirements chain.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { freezeClock, type Restore } from '../../helpers/test-clock.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { saveEvidence } from '../../../src/evidence/manager';
@@ -31,6 +30,7 @@ import {
 	scanWedgedStageA,
 } from '../../../src/workflow/stage-a-repair';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
+import { freezeClock, type Restore } from '../../helpers/test-clock.js';
 import {
 	readRepairEvents,
 	writeCommittedWal,

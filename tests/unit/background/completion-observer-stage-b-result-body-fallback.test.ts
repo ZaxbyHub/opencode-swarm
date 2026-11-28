@@ -13,7 +13,6 @@
  * authority whenever the persisted result has no body at all.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { canonicalMkdtemp } from '../../helpers/tmpdir';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -29,6 +28,7 @@ import { readTaskEvidence } from '../../../src/gate-evidence';
 import { _internals as receiptCollectorInternals } from '../../../src/hooks/review-receipt-collector';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import { seedStageAPassed } from '../../helpers/task-workflow-evidence';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const VERDICT_TEXT =
 	'[REVIEWED] | 1.1 | APPROVED | body-less store result must not shadow the event text\n' +

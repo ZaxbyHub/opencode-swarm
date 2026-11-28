@@ -23,12 +23,12 @@ import {
 	setDefaultTimeout,
 	test,
 } from 'bun:test';
-import { canonicalMkdtemp } from '../../helpers/tmpdir';
-import { freezeClock, type Restore } from '../../helpers/test-clock.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import { seedStageBGates } from '../../helpers/task-workflow-evidence';
+import { freezeClock, type Restore } from '../../helpers/test-clock.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const { phase_complete } = await import('../../../src/tools/phase-complete');
 setDefaultTimeout(30_000);

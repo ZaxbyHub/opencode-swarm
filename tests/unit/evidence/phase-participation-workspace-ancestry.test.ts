@@ -12,7 +12,6 @@
  * or rewound history and unverifiable cases stay stale (fail closed).
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { freezeClock, type Restore } from '../../helpers/test-clock.js';
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -28,6 +27,7 @@ import {
 	reserveApprovedPhaseParticipation,
 	resetPhaseParticipationForTests,
 } from '../../../src/evidence/phase-participation';
+import { freezeClock, type Restore } from '../../helpers/test-clock.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 let directory: string;

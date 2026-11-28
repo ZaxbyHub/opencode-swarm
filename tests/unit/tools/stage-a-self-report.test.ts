@@ -11,7 +11,6 @@
  * verdict — all fail-open.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { freezeClock, type Restore } from '../../helpers/test-clock.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { readCoreEvents } from '../../../src/events/core-events';
@@ -23,6 +22,7 @@ import {
 import { STAGE_A_ROUTE_EVENT_TYPE } from '../../../src/hooks/guardrails/stage-a-route';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import { reportToolSideStageA } from '../../../src/tools/stage-a-self-report';
+import { freezeClock, type Restore } from '../../helpers/test-clock.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const PASS_PAYLOAD = JSON.stringify({

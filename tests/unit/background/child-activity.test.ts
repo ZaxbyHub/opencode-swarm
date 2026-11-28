@@ -10,13 +10,13 @@
  * never block; unmatched closes are ignored; the bound holds.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { freezeClock, type Restore } from '../../helpers/test-clock.js';
 import {
 	_noteChildSessionEventAtForTesting,
 	_resetChildActivityForTesting,
 	childBlocksStaleSweep,
 	noteChildSessionEvent,
 } from '../../../src/background/child-activity';
+import { freezeClock, type Restore } from '../../helpers/test-clock.js';
 
 const SWEEP_WINDOW_MS = 30 * 60_000;
 const LONG_RUN_MS = 45 * 60_000;

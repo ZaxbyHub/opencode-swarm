@@ -20,7 +20,6 @@
  * green-bundle bar.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { freezeClock, type Restore } from '../../helpers/test-clock.js';
 import {
 	buildBackgroundCompletionEventId,
 	claimCoderSettlement,
@@ -41,6 +40,7 @@ import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import { recoverStageATaskSupervised } from '../../../src/workflow/settlement-recovery';
 import { repairWedgedStageA } from '../../../src/workflow/stage-a-repair';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
+import { freezeClock, type Restore } from '../../helpers/test-clock.js';
 import { readRepairEvents } from './_settlement-recovery-2828-helpers';
 
 let directory = '';

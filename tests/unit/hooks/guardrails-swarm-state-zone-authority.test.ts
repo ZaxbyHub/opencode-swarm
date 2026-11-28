@@ -13,10 +13,10 @@
  * .swarm/ prefix block) still holds.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { canonicalMkdtemp } from '../../helpers/tmpdir';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { checkFileAuthority } from '../../../src/hooks/guardrails';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 function isDenied(
 	result: ReturnType<typeof checkFileAuthority>,
