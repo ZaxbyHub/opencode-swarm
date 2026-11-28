@@ -1600,7 +1600,17 @@ export function createBackgroundCompletionObserver(opts: {
 						// successful no-task completion still durably consumes
 						// per its own contract (stage-b-gates no-task return).
 						applied.ok || applied.consumed,
-						{ outcome: ingestionOutcome },
+						{
+							outcome: ingestionOutcome,
+							// F3 observability: thread the Stage-B apply's failure
+							// reason into the retryable commit so the durable record
+							// says WHY every attempt failed (the attempt counter
+							// alone made the 3.11 five-attempt burn undiagnosable
+							// from the store).
+							...(applied.ok || applied.consumed
+								? {}
+								: { reason: applied.reason }),
+						},
 					);
 					if (!ingestionCommit) {
 						logger.warn(

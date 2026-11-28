@@ -2039,6 +2039,38 @@ export function getReviewerScopeGenerationForCoderCall(input: {
 	return matches.length === 1 ? cloneReviewerScopeGeneration(matches[0]) : null;
 }
 
+/**
+ * True when THIS coder call's generation is gone from the live set while a
+ * NEWER coder call for the same task holds the latest-generation slot — the
+ * exact supersession `startReviewerScopeGeneration` performs on re-dispatch
+ * (it deletes every older unclaimed generation of the task). A completion
+ * whose generation was superseded this way can never reconstruct its scope
+ * handoff: retrying the ingestion just burns the redrive budget while the
+ * successor dispatch is already running. Callers use this to consume such
+ * completions as terminal-negative stale instead of retrying them.
+ *
+ * Deliberately NOT supersession when the session state is missing entirely
+ * (a restart wiped it) — that case is not provable as superseded and keeps
+ * the pre-existing retry semantics.
+ */
+export function isReviewerScopeGenerationSupersededForCoderCall(input: {
+	parentSessionID: string;
+	taskId: string;
+	coderCallID: string;
+}): boolean {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (!session) return false;
+	const { generations, latestByTask } =
+		ensureReviewerScopeGenerationState(session);
+	const stillPresent = [...generations.values()].some(
+		(entry) =>
+			entry.taskId === input.taskId && entry.coderCallID === input.coderCallID,
+	);
+	if (stillPresent) return false;
+	const latest = latestByTask.get(input.taskId);
+	return latest !== undefined && latest.coderCallID !== input.coderCallID;
+}
+
 /** Inspect the only ready generation for a task without claiming it. */
 export function peekReadyReviewerScopeGeneration(input: {
 	parentSessionID: string;

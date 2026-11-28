@@ -4437,16 +4437,34 @@ async function initializeOpenCodeSwarm(
 										properties?.info?.sessionID ??
 										properties?.info?.id ??
 										properties?.id;
+									// session.idle / session.error / status-idle are NOT terminal
+									// for scope ownership. A delegated coder child that ends its
+									// turn while a background shell (or any deferred work) is
+									// still in flight goes idle MID-TASK and wakes on the
+									// completion notification; revoking its scope binding and
+									// currentTaskId at idle is the "task-correlated write scope
+									// detached mid-task" defect (SCOPE_NOT_DECLARED 'task
+									// unknown' right after a background-shell completion
+									// notification — 2.15/3.8/3.11 field incidents; idle without
+									// a background wait never tickled it, which is why it looked
+									// intermittent). Only true removal (session.deleted /
+									// session.removed) revokes scope. An abandoned binding
+									// keeps its 60-min TTL in memory and is also ended by
+									// the dispatch lifecycle and endAgentSession (close /
+									// lean runner); on disk it stays live, and the same
+									// owner session can revive it for up to 24 h after
+									// lapse (each revival re-arms the 60-min TTL). The v2
+									// adapter already refuses to map live
+									// busy/retry to session.idle for the same class (#3022) —
+									// this closes the genuine-idle gap on the consumer side.
+									const isSessionRemoval =
+										lifecycleEvent.type === 'session.deleted' ||
+										lifecycleEvent.type === 'session.removed';
 									if (sessionID) {
-										delegationGateHooks.sessionEnded(
-											sessionID,
-											lifecycleEvent.type === 'session.deleted' ||
-												lifecycleEvent.type === 'session.removed',
-										);
-										if (
-											lifecycleEvent.type === 'session.deleted' ||
-											lifecycleEvent.type === 'session.removed'
-										) {
+										if (isSessionRemoval) {
+											delegationGateHooks.sessionEnded(sessionID, true);
+										}
+										if (isSessionRemoval) {
 											// Exact-owner cleanup: a deleted session can never consume the
 											// one-shot bridge marker, so release it at the terminal event.
 											_architectCompactionPending.delete(sessionID);

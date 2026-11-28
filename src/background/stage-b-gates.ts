@@ -41,6 +41,7 @@ import {
 	getTaskState,
 	hasActiveTurboMode,
 	hasBothStageBCompletions,
+	isReviewerScopeGenerationSupersededForCoderCall,
 	isStageBRouteRequired,
 	markReviewerScopeGenerationMergebackPending,
 	markReviewerScopeGenerationNoChange,
@@ -619,6 +620,31 @@ export async function ingestBackgroundStageBCompletion(args: {
 					generation?.modifiedFiles ?? null,
 				);
 				const routedFingerprints = generation?.modifiedFileFingerprints ?? null;
+				// Superseded dispatch: a re-dispatch of the same task deleted this
+				// call's unclaimed generation (startReviewerScopeGeneration
+				// supersedes every older unclaimed generation of the task), so this
+				// completion can NEVER reconstruct its scope handoff — the
+				// successor dispatch already owns the task. Consume it as a
+				// terminal-negative stale instead of burning the redrive budget on
+				// deterministic retries (field cascade: every retry failed
+				// identically until exhaustion, and the exhaustion advisory's
+				// "re-dispatch" advice then armed the same fate for the successor
+				// round).
+				if (
+					!generation &&
+					isReviewerScopeGenerationSupersededForCoderCall({
+						parentSessionID: args.record.parentSessionId,
+						taskId,
+						coderCallID: args.record.callID,
+					})
+				) {
+					return {
+						ok: false,
+						consumed: true,
+						stale: true,
+						reason: `background coder scope generation for task ${taskId} was superseded by a newer dispatch of the same task; the completion is stale by construction`,
+					};
+				}
 				// Issue #2100: a background coder with zero observed files and a
 				// zero-route collecting generation is a truthful no-change, not an
 				// attribution failure.
