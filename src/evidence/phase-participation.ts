@@ -17,7 +17,10 @@ import {
 	parseTaskEnvelope,
 	type TaskEnvelope,
 } from '../background/task-envelope.js';
-import { captureWorkspaceSnapshotAsync } from '../background/workspace-snapshot.js';
+import {
+	captureWorkspaceSnapshotAsync,
+	isAncestorCommitAsync,
+} from '../background/workspace-snapshot.js';
 import {
 	getCurrentPhase,
 	isPhaseInWrapWindow,
@@ -587,15 +590,31 @@ function receiptCursorCoversPhase(
 	return isPhaseInWrapWindow(plan, phase);
 }
 
-function workspaceIdentityIsFresh(
+/**
+ * Workspace freshness for participation receipts, with the closing-window
+ * ancestry allowance (the 2026-11-23 swarm_communication_debug wedge).
+ *
+ * The strict form (project root + exact gitHead + PR head) is kept for the
+ * equal-head case. A docs receipt is otherwise routinely staled by the
+ * delivery commits of its OWN closing window — the docs agent's committed
+ * deliverable, or a sibling task's landing between the docs dispatch and
+ * phase_complete — and those commits advance HEAD monotonically. The receipt
+ * therefore stays fresh while its recorded head is an ANCESTOR of the current
+ * head: the workspace only moved forward since the docs run. A divergent or
+ * rewound history (another branch checked out, a revert to an unrelated head)
+ * is not an ancestor and stays stale, and any Git failure fails closed
+ * exactly like the strict check (cannot prove ancestry ⇒ not fresh).
+ */
+async function workspaceIdentityIsFresh(
+	directory: string,
 	expected: ParticipationWorkspace,
 	current: ParticipationWorkspace,
-): boolean {
-	return (
-		sameProjectRoot(expected.directory, current.directory) &&
-		expected.gitHead === current.gitHead &&
-		expected.prHeadSha === current.prHeadSha
-	);
+): Promise<boolean> {
+	if (!sameProjectRoot(expected.directory, current.directory)) return false;
+	if (expected.prHeadSha !== current.prHeadSha) return false;
+	if (expected.gitHead === current.gitHead) return true;
+	if (expected.gitHead === null || current.gitHead === null) return false;
+	return isAncestorCommitAsync(directory, expected.gitHead, current.gitHead);
 }
 
 function resultText(output: unknown): {
@@ -805,6 +824,7 @@ export async function observePhaseParticipationToolResult(input: {
 		return;
 	if (
 		!workspaceIdentityIsFresh(
+			input.directory,
 			binding.workspace,
 			await captureParticipationWorkspace(input.directory),
 		)
@@ -872,9 +892,12 @@ export async function completeBackgroundPhaseParticipation(input: {
 				return false;
 			// Docs agents legitimately change the dirty tree. Preserve workspace
 			// freshness by binding the project root and repository/PR identity while
-			// allowing the documentation changes that the role exists to author.
+			// allowing the documentation changes that the role exists to author —
+			// including their committed delivery and sibling closing-window
+			// commits (the ancestry allowance in workspaceIdentityIsFresh).
 			if (
 				!workspaceIdentityIsFresh(
+					input.directory,
 					pending.workspace,
 					await captureParticipationWorkspace(input.directory),
 				)
@@ -918,17 +941,31 @@ export async function readPhaseParticipation(
 	// identity hash is cursor-independent (receiptStructureHash), so cursor
 	// movement alone never invalidates it. The tolerance arms are in
 	// receiptCursorCoversPhase; any other phase stays rejected.
-	return {
-		status: 'valid',
-		found: read.store.receipts.some(
-			(receipt) =>
-				receipt.role === canonicalRole &&
-				samePlanIdentity(receipt, plan) &&
-				workspaceIdentityIsFresh(receipt.workspace, currentWorkspace) &&
-				(receipt.phase === phase ||
-					receiptCursorCoversPhase(receipt.phase, phase, plan)),
-		),
-	};
+	//
+	// Freshness is async (the closing-window ancestry allowance may run one
+	// bounded `git merge-base --is-ancestor` per drifted candidate), so the
+	// candidate set is filtered synchronously first and the freshness checks
+	// short-circuit on the first fresh receipt — an equal-head receipt never
+	// pays for a subprocess call.
+	const candidates = read.store.receipts.filter(
+		(receipt) =>
+			receipt.role === canonicalRole &&
+			samePlanIdentity(receipt, plan) &&
+			(receipt.phase === phase ||
+				receiptCursorCoversPhase(receipt.phase, phase, plan)),
+	);
+	for (const receipt of candidates) {
+		if (
+			await workspaceIdentityIsFresh(
+				directory,
+				receipt.workspace,
+				currentWorkspace,
+			)
+		) {
+			return { status: 'valid', found: true };
+		}
+	}
+	return { status: 'valid', found: false };
 }
 
 /**

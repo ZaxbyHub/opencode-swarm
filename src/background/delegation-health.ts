@@ -87,6 +87,23 @@ export interface DelegationHealthUncertaintySection {
 }
 
 /**
+ * Latest lenient coordination-read skip (schema-drift tolerance): a
+ * coordination row whose payload the current reader's RecordSchema rejects is
+ * skipped by advisory/status reads instead of poisoning the whole namespace
+ * as "uncertain". The durable record of WHICH rows were skipped keeps the
+ * drift visible to operators; write and destructive-cleanup paths stay
+ * fail-closed on the same rows.
+ */
+export interface DelegationHealthCoordinationSkipSection {
+	reason: string;
+	at: number;
+	source: string;
+	/** Bounded list of skipped coordination entity keys (sessions). */
+	skippedEntityKeys: string[];
+	skippedCount: number;
+}
+
+/**
  * One durable operator fact emitted by the shared background maintenance
  * service (issue #2104): every release, retained ambiguity, lease renewal,
  * contention, and maintenance failure is recorded here so operators can see
@@ -135,6 +152,7 @@ export interface DelegationLedgerHealth {
 	checkpoint: DelegationHealthCheckpointSection | null;
 	recovery: DelegationHealthRecoverySection | null;
 	lastUncertainty: DelegationHealthUncertaintySection | null;
+	lastCoordinationSkip?: DelegationHealthCoordinationSkipSection | null;
 	counts: {
 		activeOwners: number;
 		pendingAdvisories: number;
@@ -261,6 +279,17 @@ export const DelegationLedgerHealthSchema = z
 		checkpoint: CheckpointSectionSchema.nullable(),
 		recovery: RecoverySectionSchema.nullable(),
 		lastUncertainty: UncertaintySectionSchema.nullable(),
+		lastCoordinationSkip: z
+			.object({
+				reason: z.string().min(1),
+				at: z.number().int().nonnegative(),
+				source: z.string().min(1),
+				skippedEntityKeys: z.array(z.string().min(1)).max(64),
+				skippedCount: z.number().int().nonnegative(),
+			})
+			.strict()
+			.nullable()
+			.optional(),
 		counts: z
 			.object({
 				activeOwners: z.number().int().nonnegative(),
@@ -336,6 +365,9 @@ export function writeDelegationHealthArtifact(
 		checkpoint?: DelegationLedgerHealth['checkpoint'] | null;
 		recovery?: DelegationLedgerHealth['recovery'] | null;
 		lastUncertainty?: DelegationLedgerHealth['lastUncertainty'] | null;
+		lastCoordinationSkip?:
+			| DelegationLedgerHealth['lastCoordinationSkip']
+			| null;
 		counts?: DelegationLedgerHealth['counts'];
 		uncertainty?: DelegationHealthUncertaintySection;
 		maintenance?: DelegationLedgerHealth['maintenance'];
@@ -372,6 +404,10 @@ export function writeDelegationHealthArtifact(
 			update.checkpoint === undefined ? base.checkpoint : update.checkpoint,
 		recovery: update.recovery === undefined ? base.recovery : update.recovery,
 		lastUncertainty: update.lastUncertainty ?? base.lastUncertainty,
+		lastCoordinationSkip:
+			update.lastCoordinationSkip === undefined
+				? (base.lastCoordinationSkip ?? null)
+				: update.lastCoordinationSkip,
 		counts: update.counts ?? base.counts,
 		maintenance:
 			update.maintenance === undefined

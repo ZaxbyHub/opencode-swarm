@@ -175,7 +175,7 @@ Sections marked `(strict)` reject unknown nested keys at config load time - a ty
 ## Architect prompt budget (characters and model tokens)
 
 The architect's built-in prompt composition is bounded by a published
-character ceiling, `ARCHITECT_PROMPT_BUDGET_CHARS` (165,500 chars in
+character ceiling, `ARCHITECT_PROMPT_BUDGET_CHARS` (166,000 chars in
 `src/agents/architect.ts`). Every supported feature combination — the default
 render, the work-complete council on or off, the advisory General Council
 (`council.general.enabled`) composed together with every documented opt-in
@@ -195,7 +195,7 @@ Two separate quantities are measured and recorded for every composition:
 - **Model tokens** — an estimate only (`estimateModelTokens`, roughly 4
   characters per token, rounded up). Real token usage varies by model and
   content; the estimate is reported next to the character count, never instead
-  of it, so a ~41K-token estimate at the 165K-char ceiling is understood as an
+  of it, so a ~41K-token estimate at the 166K-char ceiling is understood as an
   approximation of the system prompt's share of a 128K-token context window.
 
 Overflow policy (deterministic, guidance-preserving):
@@ -1394,11 +1394,13 @@ store's 256 KiB per-line cap. The closed route vocabulary:
 |---|---|---|
 | valid_pass | Correlated PASS applied; task advanced to pre_check_passed | None — proceed to Stage B |
 | pre_check_failed | Correlated FAIL applied; task moved to rework_required | Re-dispatch the coder with the findings |
+| pre_check_infra_failed | Correlated FAIL classified as infrastructure-only (a gate execution/persistence error — e.g. a missing tool, a scan-process failure, or an evidence-bundle write error — with no findings on the code under gate); NO transition written, the task's retry budget and workflow state are untouched | Do NOT re-dispatch a coder — repair the environment or the reported storage condition, then re-run the gate |
 | invalid_result | Result not decodable as a valid pre_check_batch outcome; no transition | Re-run the gate; check the tool output contract |
 | no_task_correlation | Completed gate call with no attributable task | Run `/swarm recover` to repair attribution, then re-run the gate |
 | attribution_ambiguous | Durable fallback could not safely attribute (multiple candidates, or sole candidate unbound/unverifiable) | Run `/swarm recover` to repair Stage A attribution |
 | late_result | Correlation generation stale (task repaired/re-generated meanwhile); nothing written | Re-run the gate against the current generation |
 | duplicate_result | Idempotent replay of an already-applied receipt; no state change | None — the receipt already landed |
+| terminal_settlement_wedge | Scanned files match a task whose workflow sits at idle/blocked behind a COMMITTED (terminal) coder settlement — the mechanical Stage A write is state-blocked, so the result was not recorded | Run `recover_stage_a_task` (architect-only, audited) when the settlement still justifies Stage A; otherwise dispatch a coder round with a real in-scope mutation, then re-run the gate |
 
 Registered-host validation: `tests/integration/guardrails-registered-host-stage-a.test.ts`
 boots the real plugin `server()` (XDG-hermetic), executes `placeholder_scan`
@@ -1406,6 +1408,42 @@ and `syntax_check` through the registered tool map, and drives
 valid/rejected receipts through the registered `tool.execute.before/after`
 hooks with guardrails enabled and disabled; expected result classes are
 bounded JSON tool outputs plus the durable states and route events above.
+
+### Communication debug log maintenance (`prune_communication_log`)
+
+A project that keeps a `.swarm/swarm_communication_debug.md` incident log
+(the swarm-communication debugging convention) gets two maintenance paths:
+
+- **Auto-prune** (session-close maintenance pass): a `## Vorfall` incident
+  whose `Status:` line says closed (leading verdict word wins —
+  `GESCHLOSSEN`/`closed`/`OFFEN`/`open`, bold markdown accepted) AND whose
+  every `Task-ID:` has workflow evidence at terminal `complete` is removed
+  automatically; every removal appends a `communication_log_pruned` core
+  event. The pass is bounded (1 MB), idempotent, mtime-memoed, lock-serialized,
+  and fail-open — a locked or failing pass leaves the file untouched for the
+  next run.
+- **AI release** (the `prune_communication_log` tool, architect-only,
+  audited): everything else — a closed entry whose task is not provably
+  complete (or that names no task), or an entry without a Status line — is
+  never auto-removed. The tool's no-argument mode reports the AI-release
+  worklist with per-entry reasons; with `entry_headline` + `reason` it
+  removes exactly ONE closed-or-unclear entry and audits the decision to
+  the core events log. Open incidents and the structural sections (header,
+  format, open-points lists) are never touched.
+
+### File zones and `blockedZones` (architect write authority)
+
+`classifyFile` (src/context/zone-classifier.ts) assigns every path one of
+`production`, `test`, `config`, `generated`, `docs`, `build`, `state`. The
+`state` zone is ONLY `.swarm/loop/**` — the architect's own loop-run state
+(the `AUTHORITY_POLICY_DENY` wedge fix). Gate-integrity surfaces under
+`.swarm/` keep their base classifications (`.json` → `config`, ledgers and
+logs → `production`), so the architect's default `blockedZones`
+(`generated`, `config` — the #894 lint-bypass class) keeps blocking evidence
+bundles, route receipts, `full-auto-state.json`, and `session/` state; a
+consumer that must lock the loop state down too can add `blockedZones:
+["state"]` to an agent rule (older plugin versions reject the value —
+7.205.12+ accepts it).
 
 ### Gate-denial escalation
 

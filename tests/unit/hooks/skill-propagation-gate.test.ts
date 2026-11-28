@@ -513,69 +513,10 @@ describe('skillPropagationGateBefore', () => {
 				prompt: 'SKILLS: writing-tests\ndo work',
 			},
 		});
+		// Happy path: a matched reference stays silent (the skills_field
+		// semantics pins — none/omitted warns + the inline-body trace — live
+		// in skill-propagation-inline-trace.test.ts — FR-006 cap).
 		expect(warnEventWritten).toHaveLength(0);
-	});
-
-	test('logs warning when SKILLS field is none and skills exist', async () => {
-		const warnEventWritten: Array<Record<string, unknown>> = [];
-		applyOverrides(_internals, {
-			parseDelegationArgs: () => ({
-				targetAgent: 'coder',
-				skillsField: 'none',
-			}),
-			discoverAvailableSkills: () => ['.claude/skills/foo/SKILL.md'],
-			writeWarnEvent: (_d: string, r: Record<string, unknown>) =>
-				warnEventWritten.push(r),
-		});
-
-		await runGate({
-			tool: 'task',
-			agent: 'architect',
-			args: {
-				subagent_type: 'mega_coder',
-				prompt: 'SKILLS: none\ndo work',
-			},
-		});
-
-		expect(warnEventWritten).toHaveLength(1);
-		expect(warnEventWritten[0]).toMatchObject({
-			type: 'skill_propagation_warn',
-			target_agent: 'coder',
-			skills_missing: true,
-		});
-	});
-
-	test('logs warning when SKILLS field is missing and skills exist', async () => {
-		const warnEventWritten: Array<Record<string, unknown>> = [];
-		applyOverrides(_internals, {
-			parseDelegationArgs: () => ({ targetAgent: 'coder', skillsField: '' }),
-			discoverAvailableSkills: () => [
-				'.claude/skills/foo/SKILL.md',
-				'.claude/skills/bar/SKILL.md',
-			],
-			writeWarnEvent: (_d: string, r: Record<string, unknown>) =>
-				warnEventWritten.push(r),
-		});
-
-		await runGate({
-			tool: 'task',
-			agent: 'architect',
-			args: {
-				subagent_type: 'mega_coder',
-				prompt: 'do work without SKILLS',
-			},
-		});
-
-		expect(warnEventWritten).toHaveLength(1);
-		expect(warnEventWritten[0]).toMatchObject({
-			type: 'skill_propagation_warn',
-			target_agent: 'coder',
-			skills_missing: true,
-			available_skills: [
-				'.claude/skills/foo/SKILL.md',
-				'.claude/skills/bar/SKILL.md',
-			],
-		});
 	});
 
 	test('writes warning event to events.jsonl', async () => {

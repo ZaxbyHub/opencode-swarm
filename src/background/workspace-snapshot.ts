@@ -487,6 +487,37 @@ export async function resolveExactMergeBaseAsync(
 	return mergeBase && /^[0-9a-f]{6,64}$/i.test(mergeBase) ? mergeBase : null;
 }
 
+/**
+ * Whether `ancestor` is an ancestor of `descendant` (the history only moved
+ * forward between the two). Used by the docs phase-participation freshness
+ * check: a docs receipt recorded at dispatch time is routinely superseded by
+ * the delivery commits of its own closing window (the docs agent's committed
+ * deliverable, or a sibling task's landing), and those advance HEAD
+ * monotonically — an ancestry relation, not a workspace identity change.
+ *
+ * `git merge-base --is-ancestor` prints nothing and exits 0 for true, exits 1
+ * for false; `runGitAsync` collapses every failure mode (non-zero exit,
+ * timeout, buffer overflow, spawn error) into `null`, so this helper is
+ * fail-closed by construction: anything it cannot prove is "not an ancestor".
+ */
+export async function isAncestorCommitAsync(
+	directory: string,
+	ancestor: string,
+	descendant: string,
+): Promise<boolean> {
+	if (!isSafeGitRevisionToken(ancestor) || !isSafeGitRevisionToken(descendant))
+		return false;
+	return (
+		(await runGitAsync(directory, [
+			'merge-base',
+			'--is-ancestor',
+			'--',
+			ancestor,
+			descendant,
+		])) !== null
+	);
+}
+
 export interface PrReviewDiffStats {
 	changedLines: number;
 	changedFiles: number;

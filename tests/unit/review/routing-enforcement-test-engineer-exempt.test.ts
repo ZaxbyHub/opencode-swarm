@@ -11,7 +11,7 @@ afterEach(() => {
 });
 
 /**
- * Regression (session 29b8ccea / Wirtschaftssimulation task 1.8): a
+ * Regression (session 29b8ccea / consumer-project task 1.8): a
  * test-engineer-exempt task (docs-only, durable evidence flag
  * `test_engineer_exempt`, unauthenticated) whose dispatch-time route receipt still
  * listed a test-engineer slot could never reach route completeness — the

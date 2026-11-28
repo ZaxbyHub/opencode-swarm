@@ -13,6 +13,7 @@ import {
 	DELEGATION_COMPACTION_LOW_WATER_BYTES,
 	MAX_RECOVERY_LEDGER_BYTES,
 	maintainBackgroundDelegations,
+	readDelegationsDetailed,
 	scanBackgroundCoderReservationsForAdmission,
 	scanDelegationsForRecovery,
 } from '../background/pending-delegations';
@@ -364,11 +365,23 @@ export interface BackgroundWorkStatus {
 	 * reservation scan both validated; 'uncertain' when either store is
 	 * corrupt/over-bound — in that case counts/reservations are NOT presented
 	 * (never a partial record set as authoritative) and `uncertainty` carries
-	 * the typed reason.
+	 * the typed reason; 'coordination-lenient' when the strict recovery scan
+	 * refused because of schema-drifted coordination rows but the lenient
+	 * advisory read still produced complete-for-display counts — the drifted
+	 * rows are named in `coordinationSkips` and every write/cleanup path
+	 * remains fail-closed on them.
 	 */
-	source: 'validated-recovery' | 'uncertain';
+	source: 'validated-recovery' | 'uncertain' | 'coordination-lenient';
 	/** Typed uncertainty reason when source is 'uncertain'. */
 	uncertainty?: string;
+	/**
+	 * Bounded facts about coordination rows skipped by the lenient read
+	 * (present only when source is 'coordination-lenient').
+	 */
+	coordinationSkips?: {
+		count: number;
+		entityKeys: string[];
+	};
 }
 
 /**
@@ -436,6 +449,36 @@ async function collectBackgroundWorkStatus(
 		};
 	}
 	if (scan.status === 'uncertain') {
+		// Schema-drift tolerance: the strict recovery scan (rightly) refuses
+		// when ANY coordination row fails RecordSchema validation, but one
+		// drifted row — e.g. written by a newer plugin release whose vocabulary
+		// the current reader lacks — must not make the whole namespace display
+		// as "uncertain". Fall back to the lenient advisory read ONLY when it
+		// actually explains the gap (coordination rows were skipped): a
+		// lenient ok with no skipped rows (e.g. a corrupt legacy ledger whose
+		// malformed lines the fold silently skips) keeps the strict
+		// uncertainty — partial truth must not present as counts.
+		const lenient = readDelegationsDetailed(directory);
+		if (lenient.status === 'ok') {
+			const skipped = lenient.skippedCoordinationRows ?? [];
+			if (skipped.length > 0) {
+				for (const record of lenient.records) {
+					if (record.status in counts) {
+						counts[record.status as keyof typeof counts] += 1;
+					}
+				}
+				return {
+					counts,
+					reservations: [],
+					maintenance,
+					source: 'coordination-lenient',
+					coordinationSkips: {
+						count: skipped.length,
+						entityKeys: skipped.slice(0, 8),
+					},
+				};
+			}
+		}
 		return {
 			...empty,
 			uncertainty: `delegation ledger over its recovery bound or corrupt: ${scan.reason}`,
@@ -1495,6 +1538,16 @@ function renderBackgroundWorkLines(
 		lines.push(
 			`  - Delegations: ${counts.pending} pending, ${counts.running} running, ${counts.completed} completed (unconsumed), ${counts.consumed} consumed, ${counts.stale} stale, ${counts.cancelled} cancelled, ${counts.rejected} rejected, ${counts.error} error, ${counts.ingestion_error} ingestion_error`,
 		);
+		if (backgroundWork.source === 'coordination-lenient') {
+			const skips = backgroundWork.coordinationSkips;
+			const named =
+				skips && skips.entityKeys.length > 0
+					? ` (${skips.entityKeys.map((key) => `${key.slice(0, 16)}…`).join(', ')})`
+					: '';
+			lines.push(
+				`  - ⚠ Coordination schema drift: ${skips?.count ?? 0} row(s) skipped by this display${named} — the strict scan refuses, so writes, sweeps, and destructive cleanup stay fail-closed until the drifted row(s) are repaired or re-read by a newer plugin build`,
+			);
+		}
 		if (backgroundWork.reservations.length > 0) {
 			lines.push(
 				`  - Reservations (${backgroundWork.reservations.length} active):`,

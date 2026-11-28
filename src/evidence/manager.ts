@@ -31,7 +31,7 @@ import {
 import { readSwarmFileAsync, validateSwarmPath } from '../hooks/utils';
 import { redactEvidenceDeep } from '../security/evidence-redaction';
 import { SNAPSHOT_EXCLUDED_EVIDENCE_ENTRIES } from '../tools/phase-complete/snapshot-identity';
-import { warn } from '../utils';
+import { log, warn } from '../utils';
 import { bunWrite } from '../utils/bun-compat';
 import {
 	assertProjectRoot,
@@ -275,15 +275,49 @@ export async function saveEvidence(
 				updated_at: new Date().toISOString(),
 			};
 
-			// Check size limit
-			// #3893/#3915 owner-approved fix (option b): evidence bundles carry
-			// finding/model free text — redact at the write boundary (the
-			// #3844 evidence-boundary pattern).
-			const bundleJson = JSON.stringify(redactEvidenceDeep(updatedBundle));
+			// Byte-aware compaction with archive (2026-11-27, task 2.18): the
+			// entry-count cap above cannot bound a bundle whose entries are
+			// LARGE — the sast_scan pseudo-task bundle carries full findings
+			// lists, so 100 entries ran to ~528KB against the 512000-byte cap
+			// and every further append threw, failing each gate run's evidence
+			// save (SAST verdict fail at 0 findings) and wedging Stage A. When
+			// the appended bundle would exceed the cap, archive-and-drop the
+			// OLDEST entries until it fits. Nothing is lost: every dropped
+			// entry is appended to evidence-archive.jsonl beside the bundle
+			// BEFORE the compacted bundle is written (an archive failure aborts
+			// the save with the bundle untouched), and a single entry that
+			// alone exceeds the cap still fails honestly — the caller must
+			// bound its own payload.
+			// #3893/#3915 owner-approved fix (option b, merged): evidence
+			// bundles carry finding/model free text — redact at the write
+			// boundary (the #3844 evidence-boundary pattern) BEFORE compaction,
+			// so the persisted bundle AND every archived entry are redacted and
+			// the byte cap measures the redacted payload that actually lands.
+			let persistedBundle = redactEvidenceDeep(updatedBundle);
+			let bundleJson = JSON.stringify(persistedBundle);
 			if (bundleJson.length > EVIDENCE_MAX_JSON_BYTES) {
-				throw new Error(
-					`Evidence bundle size (${bundleJson.length} bytes) exceeds maximum (${EVIDENCE_MAX_JSON_BYTES} bytes)`,
-				);
+				const kept = [...persistedBundle.entries];
+				const archived: Evidence[] = [];
+				while (bundleJson.length > EVIDENCE_MAX_JSON_BYTES && kept.length > 1) {
+					archived.push(kept.shift() as Evidence);
+					persistedBundle = {
+						...persistedBundle,
+						entries: [...kept],
+					};
+					bundleJson = JSON.stringify(persistedBundle);
+				}
+				if (bundleJson.length > EVIDENCE_MAX_JSON_BYTES) {
+					throw new Error(
+						`Evidence bundle size (${bundleJson.length} bytes) exceeds maximum (${EVIDENCE_MAX_JSON_BYTES} bytes) even after archiving ${archived.length} oldest entr${archived.length === 1 ? 'y' : 'ies'} — a single entry alone exceeds the cap`,
+					);
+				}
+				await archiveEvidenceEntries(directory, sanitizedTaskId, archived);
+				log('evidence bundle compacted (oldest entries archived)', {
+					taskId: sanitizedTaskId,
+					archived: archived.length,
+					kept: persistedBundle.entries.length,
+					bytes: bundleJson.length,
+				});
 			}
 
 			// Create directory (recursive)
@@ -314,7 +348,7 @@ export async function saveEvidence(
 			// otherwise let the next read observe stale pre-write content).
 			invalidateCachedArtifact(evidencePath);
 
-			return updatedBundle;
+			return persistedBundle;
 		},
 	);
 }
@@ -333,6 +367,65 @@ function isFlatRetrospective(
 		(parsed as Record<string, unknown>).type === 'retrospective' &&
 		!(parsed as Record<string, unknown>).schema_version
 	);
+}
+
+/**
+ * Archive retention for the evidence-bundle compaction: the active archive
+ * is bounded, and once it exceeds {@link EVIDENCE_ARCHIVE_MAX_BYTES} it is
+ * rotated into a timestamped generation (newest
+ * {@link EVIDENCE_ARCHIVE_GENERATIONS} generations are kept) so disk usage
+ * stays bounded while the forensic window stays deep.
+ */
+const EVIDENCE_ARCHIVE_MAX_BYTES = 5 * 1024 * 1024;
+const EVIDENCE_ARCHIVE_GENERATIONS = 3;
+
+/**
+ * Append entries being compacted out of a task's evidence bundle to the
+ * task's evidence archive (evidence-archive.jsonl beside the bundle, one
+ * JSON entry per line). MUST succeed before the compacted bundle is
+ * written: an archive failure aborts the save with the bundle untouched,
+ * so compaction can never lose an entry.
+ */
+async function archiveEvidenceEntries(
+	directory: string,
+	taskId: string,
+	entries: Evidence[],
+): Promise<void> {
+	if (entries.length === 0) return;
+	const relativePath = path.join('evidence', taskId, 'evidence-archive.jsonl');
+	const archivePath = validateSwarmPath(directory, relativePath);
+	const archiveDir = path.dirname(archivePath);
+	mkdirSync(archiveDir, { recursive: true });
+	try {
+		const stat = _internals.statSync(archivePath);
+		if (stat.size > _internals.archiveMaxBytes) {
+			const stamp = _internals.now().toISOString().replace(/[:.]/g, '-');
+			renameSync(
+				archivePath,
+				path.join(archiveDir, `evidence-archive-${stamp}.jsonl`),
+			);
+			const rotated = readdirSync(archiveDir)
+				.filter(
+					(f) => f.startsWith('evidence-archive-') && f.endsWith('.jsonl'),
+				)
+				.sort();
+			for (const stale of rotated.slice(
+				0,
+				Math.max(0, rotated.length - _internals.archiveGenerations),
+			)) {
+				try {
+					rmSync(path.join(archiveDir, stale), { force: true });
+				} catch {
+					// best effort: a stale generation that cannot be removed
+					// must not block the archive append
+				}
+			}
+		}
+	} catch {
+		// No archive yet (first compaction) — nothing to rotate.
+	}
+	const payload = `${entries.map((entry) => JSON.stringify(entry)).join('\n')}\n`;
+	await _internals.appendArchive(archivePath, payload);
 }
 
 /**
@@ -843,6 +936,12 @@ export const _internals: {
 	realpathSync: typeof realpathSync;
 	statSync: typeof statSync;
 	now: () => Date;
+	/** Test seam: the archive append used by the bundle compaction. */
+	appendArchive: (file: string, text: string) => Promise<void>;
+	/** Test seam: the active-archive rotation bound. */
+	archiveMaxBytes: number;
+	/** Test seam: rotated generations kept. */
+	archiveGenerations: number;
 } = {
 	wrapFlatRetrospective,
 	loadEvidence,
@@ -855,4 +954,7 @@ export const _internals: {
 	realpathSync,
 	statSync,
 	now: () => new Date(),
+	appendArchive: (file, text) => fs.appendFile(file, text, 'utf8'),
+	archiveMaxBytes: EVIDENCE_ARCHIVE_MAX_BYTES,
+	archiveGenerations: EVIDENCE_ARCHIVE_GENERATIONS,
 } as const;

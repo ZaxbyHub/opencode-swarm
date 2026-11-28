@@ -472,22 +472,8 @@ describe('issue #2268 — /swarm recover command', () => {
 			expect(workflow.settlementRecovery).toBe(true);
 		});
 
-		test('a receipts-less idle task gets the pointed settlement-wedge refusal, not the conflated dead end', async () => {
-			await settleAt('4.3', 'idle');
-			await writeGreenPreCheck();
-
-			const out = await handleRecoverCommand(directory, ['4.3']);
-
-			expect(out).toContain('no Stage A repair is needed or provable here');
-			expect(out).toContain('recover_stage_a_task');
-			expect(out).toContain(
-				'--force does not override Stage A wedge-classification refusals',
-			);
-			expect(out).toContain('No wedged tasks repaired.');
-			const workflow = getTaskWorkflowSnapshot(
-				await readTaskEvidence(directory, '4.3'),
-			);
-			expect(workflow.state).toBe('idle');
-		});
+		// The 80802e0dc contract pins (chain-verified accepted_mutation
+		// repair + proof-less pointed refusal) live in
+		// recover-settlement-contract.test.ts — split out for the FR-006 cap.
 	});
 });

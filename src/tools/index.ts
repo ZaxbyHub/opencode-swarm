@@ -243,6 +243,10 @@ export {
 	prepare_pr_workflow_checkout,
 } from './prepare-pr-workflow-checkout';
 export {
+	executePruneCommunicationLog,
+	prune_communication_log,
+} from './prune-communication-log';
+export {
 	executeRebindPrFeedbackHead,
 	rebind_pr_feedback_head,
 } from './rebind-pr-feedback-head';

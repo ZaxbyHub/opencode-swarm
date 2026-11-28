@@ -326,6 +326,54 @@ export function readTaskGateRequirementsReceiptsSync(
 	return receipts;
 }
 
+/** Durable accepted-mutation facts for one task, from the requirements chain. */
+export interface AcceptedMutationReceiptJustification {
+	/** Parsed `recordedAt` of the receipt, in epoch ms. */
+	recordedAtMs: number;
+	/** The transition that carried the accepted mutation (e.g. `background-coder:ses_…`). */
+	sourceTransitionId: string | null;
+	/** Workflow generation the receipt was recorded under. */
+	generation: number;
+}
+
+/**
+ * Latest chain-verified coder `accepted_mutation` receipt for a task from the
+ * append-only requirements ledger.
+ *
+ * Background-dispatched coder rounds never write a coder-settlement WAL, so
+ * for those tasks THIS receipt is the only durable proof that a coder mutation
+ * was ever accepted — exactly the fact the settlement-WAL recovery paths
+ * demand (issue-class: campaign-rebuild Stage-A wedge, where the delivery was
+ * committed before the rebuild and re-dispatches settle as
+ * `dispatch_no_mutation` forever).
+ *
+ * Returns null when the ledger exists but carries no coder accepted_mutation
+ * receipt. A corrupt chain (hash/linkage/identity) propagates the
+ * `TASK_GATE_REQUIREMENTS_*` error: corrupted durable state must never
+ * justify a recovery.
+ */
+export async function latestAcceptedMutationReceipt(
+	directory: string,
+	taskId: string,
+): Promise<AcceptedMutationReceiptJustification | null> {
+	const receipts = await readTaskGateRequirementsReceipts(directory, taskId);
+	let latest: AcceptedMutationReceiptJustification | null = null;
+	for (const receipt of receipts) {
+		if (receipt.normalizedRole !== 'coder') continue;
+		if (receipt.sourceEvent !== 'accepted_mutation') continue;
+		const parsed = Date.parse(receipt.recordedAt);
+		if (!Number.isFinite(parsed)) continue;
+		if (latest === null || parsed >= latest.recordedAtMs) {
+			latest = {
+				recordedAtMs: parsed,
+				sourceTransitionId: receipt.sourceTransitionId,
+				generation: receipt.generation,
+			};
+		}
+	}
+	return latest;
+}
+
 /**
  * Reconstructs exact route evidence from the append-only durable requirement
  * chain. Rows collapse to one entry per (role, identity), latest row winning:

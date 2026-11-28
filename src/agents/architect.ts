@@ -138,7 +138,11 @@ export const ARCHITECT_MEMORY_OUTCOME_GUIDANCE = `After using recalled memory or
 // cell measured 165229 against the previous ~5-char headroom. The deliberate
 // 500-char step covers the disclosure; docs/configuration.md states the
 // ceiling.
-export const ARCHITECT_PROMPT_BUDGET_CHARS = 165_500;
+// 165500 -> 166000 (#3939): the prune_communication_log architect tool joined
+// the tool roster and the tool schema block, so the prefixed feature-heavy
+// cell measured 165553. The same deliberate 500-char step covers it;
+// docs/configuration.md states the ceiling.
+export const ARCHITECT_PROMPT_BUDGET_CHARS = 166_000;
 
 /**
  * Per-tool description cap for the architect prompt's AVAILABLE TOOLS line

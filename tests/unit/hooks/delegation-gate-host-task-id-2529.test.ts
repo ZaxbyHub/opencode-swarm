@@ -57,11 +57,12 @@ describe('delegation gate host task tool id (issue #2529)', () => {
 		expect(violations.map((v) => `${v.kind}:${v.line}: ${v.source}`)).toEqual(
 			[],
 		);
-		// Exactly five guards call the boundary directly (toolBefore
+		// Exactly six guards call the boundary directly (toolBefore
 		// coder-scope prep, toolAfter background-noop, critic preflight,
-		// post-preflight early-out, the isTaskTool projection); the
+		// post-preflight early-out, the isTaskTool projection, and the
+		// tests_run catch-22 gate-dispatch exception); the
 		// completion-revoke block reuses that projected boolean.
 		const boundaryUses = source.match(/\bisTaskToolId\(/g)?.length ?? 0;
-		expect(boundaryUses).toBe(5);
+		expect(boundaryUses).toBe(6);
 	});
 });

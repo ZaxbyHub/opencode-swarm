@@ -1,5 +1,5 @@
 /**
- * Regression (Wirtschaftssimulation session 29b8ccea, task 1.8): the
+ * Regression (consumer-project session 29b8ccea, task 1.8): the
  * dispatch-time review route allocation demanded the complexity-routed
  * test-engineer count even when the task's durable evidence proved the
  * sanctioned test_engineer exemption (docs-only declared+observed Markdown

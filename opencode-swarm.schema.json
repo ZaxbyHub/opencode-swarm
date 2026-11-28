@@ -1376,7 +1376,8 @@
                     "config",
                     "generated",
                     "docs",
-                    "build"
+                    "build",
+                    "state"
                   ]
                 }
               },

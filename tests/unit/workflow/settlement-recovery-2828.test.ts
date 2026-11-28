@@ -19,6 +19,7 @@ import { createSafeTestDir } from '../../helpers/safe-test-dir';
 import {
 	readRepairEvents,
 	settleAt,
+	stripRequirementsLedger,
 	writeCommittedWal,
 	writeGreenBundles,
 } from './_settlement-recovery-2828-helpers';
@@ -164,8 +165,9 @@ describe('recoverStageATaskSupervised (issue #2828)', () => {
 		).rejects.toThrow('RECOVER_STAGE_A_STATE_REQUIRED');
 	});
 
-	test('refuses without a COMMITTED accepted settlement WAL', async () => {
+	test('refuses without any durable settlement receipt (no WAL, no requirements receipt)', async () => {
 		await settleAt(directory, '7.7', 'idle');
+		stripRequirementsLedger(directory, '7.7');
 		await writeGreenBundles(directory);
 		await expect(
 			recoverStageATaskSupervised(directory, architectSession('arch-7'), {
@@ -175,8 +177,9 @@ describe('recoverStageATaskSupervised (issue #2828)', () => {
 		).rejects.toThrow('RECOVER_STAGE_A_SETTLEMENT_REQUIRED');
 	});
 
-	test('refuses an accepted:false settlement WAL', async () => {
+	test('refuses an accepted:false settlement WAL when no accepted_mutation receipt exists', async () => {
 		await settleAt(directory, '7.8', 'idle');
+		stripRequirementsLedger(directory, '7.8');
 		writeCommittedWal(directory, '7.8', false);
 		await writeGreenBundles(directory);
 		await expect(

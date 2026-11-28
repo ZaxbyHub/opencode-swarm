@@ -125,6 +125,18 @@ describe('gate-evidence supervised stage_a_passed (issue #2755)', () => {
 			expectedGeneration: 1,
 			transitionId: 'rev-done',
 		});
+		// 2026-11-25 (tests_run catch-22): a complete route on the reviewer
+		// binding alone no longer reaches tests_run while test_engineer is
+		// still required and unbound — bind the TE to earn the state the
+		// old shortcut used to fabricate.
+		await transitionTaskWorkflowEvidence(tempDir, '1.5', {
+			type: 'stage_b_completed',
+			gate: 'test_engineer',
+			sessionId: 'te-session',
+			routeComplete: true,
+			expectedGeneration: 1,
+			transitionId: 'te-done',
+		});
 		expect(readTaskEvidenceRaw(tempDir, '1.5')?.workflow?.state).toBe(
 			'tests_run',
 		);

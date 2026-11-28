@@ -15,7 +15,8 @@ import {
 import {
 	appendStageARepairEvent,
 	hasGreenPostSettlementPreCheck,
-	latestCommittedAcceptedSettlementMs,
+	resolveStageASettlementJustification,
+	type StageASettlementJustification,
 } from './stage-a-repair.js';
 
 export interface SettlementRecoverySummary {
@@ -33,6 +34,14 @@ export interface SettlementRecoverySummary {
 	 * audit record that may not exist (issue #2755 review, FB-001 contract).
 	 */
 	auditEventRecorded: boolean;
+	/**
+	 * Which durable receipt admitted the recovery: `settlement_wal` (a
+	 * COMMITTED accepted coder settlement) or `requirements_receipt` (a
+	 * chain-verified accepted_mutation requirements receipt — the only durable
+	 * settlement proof background-dispatched coder rounds produce). Undefined
+	 * on the already-recovered no-op path.
+	 */
+	justification?: StageASettlementJustification['via'];
 }
 
 /**
@@ -158,20 +167,28 @@ export async function recoverStageATaskSupervised(
 	if (workflow.state !== 'idle' && workflow.state !== 'blocked') {
 		throw new Error(
 			`RECOVER_STAGE_A_STATE_REQUIRED: task ${taskId} is at ${workflow.state}, not idle/blocked. ` +
-				'This recovery applies only to the settlement-backed wedge (a COMMITTED accepted coder settlement while the workflow drifted to idle or blocked). ' +
+				'This recovery applies only to the settlement-backed wedge (a durable accepted coder settlement while the workflow drifted to idle or blocked). ' +
 				'From coder_delegated, run pre_check_batch or /swarm recover; from rework_required without a code change, use recover_rework_task.',
 		);
 	}
 
 	// The durable receipts: a COMMITTED settlement that attributed an accepted
-	// mutation (the code is committed) …
+	// mutation (the code is committed) — resolved WAL-first. Background-
+	// dispatched coder rounds never write a settlement WAL; for those tasks the
+	// chain-verified `accepted_mutation` requirements receipt is the same
+	// durable settlement fact, recorded by the accepted mutation itself. Only
+	// when NEITHER receipt exists is this genuinely an unstarted or deliberately
+	// stopped task.
 	const { states: walStates } = await listCoderSettlementWalStates(directory);
-	const settledAfterMs = latestCommittedAcceptedSettlementMs(taskId, walStates);
-	if (settledAfterMs === null) {
+	const justification = await resolveStageASettlementJustification(
+		directory,
+		taskId,
+		walStates,
+	);
+	if (justification === null) {
 		throw new Error(
-			`RECOVER_STAGE_A_SETTLEMENT_REQUIRED: refusing to recover task ${taskId} — no COMMITTED accepted coder settlement exists for it. ` +
-				'The settlement receipt is what distinguishes this wedge from a not-yet-started or deliberately stopped task; ' +
-				'recovery without it would fabricate Stage A justification. Background-dispatched coder tasks never write a settlement WAL and cannot use this path.',
+			`RECOVER_STAGE_A_SETTLEMENT_REQUIRED: refusing to recover task ${taskId} — no durable accepted coder settlement exists for it (no COMMITTED settlement WAL, no chain-verified accepted_mutation receipt in the task-gate-requirements ledger, and no settled background coder settlement with an accepted ingestion outcome). ` +
+				'The settlement receipt is what distinguishes this wedge from a not-yet-started or deliberately stopped task; recovery without it would fabricate Stage A justification. For a verification-only background round whose deliverable landed outside the delegation lane, the settled+accepted background record itself is the receipt — if it exists this refusal is a bug.',
 		);
 	}
 
@@ -180,7 +197,7 @@ export async function recoverStageATaskSupervised(
 	// project never persists a sast_scan bundle and cannot use this recovery.
 	const greenness = await hasGreenPostSettlementPreCheck(
 		directory,
-		settledAfterMs,
+		justification.settledAfterMs,
 	);
 	if (!greenness.green) {
 		const sastHint =
@@ -238,6 +255,25 @@ export async function recoverStageATaskSupervised(
 		transitionId,
 		generation: workflow.generation,
 		settlementRecovery: true,
+		// Which durable receipt admitted the repair: 'settlement_wal' |
+		// 'requirements_receipt' | 'background_settlement' (background coder
+		// rounds never write a WAL).
+		justification: justification.via,
+		...(justification.via === 'requirements_receipt'
+			? {
+					justificationTransitionId: justification.sourceTransitionId,
+					justificationGeneration: justification.generation,
+				}
+			: {}),
+		...(justification.via === 'background_settlement'
+			? {
+					// The verification-only shape must be visible in the audit:
+					// accepted=false means the settled round attributed no files
+					// and the repair rides on the architect's audited vouch.
+					justificationAccepted: justification.accepted,
+					justificationCorrelationId: justification.correlationId,
+				}
+			: {}),
 		predecessorTransitionId: workflow.lastTransitionId ?? null,
 		sessionId: sessionID,
 		reason: sanitizedReason,
@@ -251,5 +287,6 @@ export async function recoverStageATaskSupervised(
 		recordedAt,
 		alreadyRecovered: false,
 		auditEventRecorded,
+		justification: justification.via,
 	};
 }

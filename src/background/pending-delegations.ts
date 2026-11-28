@@ -75,6 +75,8 @@ import {
 	sameProjectRoot,
 } from '../utils/canonical-root.js';
 import * as logger from '../utils/logger.js';
+import { isCommittedAcceptedSettlementForLaunch } from '../workflow/coder-settlement-launch-proof.js';
+import { childBlocksStaleSweep } from './child-activity';
 import {
 	appendDelegationMaintenanceObservation,
 	DelegationCheckpointAuditSchema,
@@ -1444,10 +1446,54 @@ function releaseReservationLeaseIfPresent(
 	}
 }
 
+/**
+ * Result of reading the delegation coordination namespace: the parsed
+ * records (null = the authoritative state is uncertain — callers must fail
+ * closed) plus, in lenient mode, the bounded list of coordination rows whose
+ * payload failed RecordSchema validation and was skipped.
+ */
+interface CoordinationRowsRead {
+	records: BackgroundDelegationRecord[] | null;
+	skippedEntityKeys: string[];
+}
+
+/**
+ * Lenient coordination reads skip at most this many schema-invalid rows. A
+ * wider drift (a systematic writer/reader vocabulary regression poisoning
+ * many rows at once) must stay visible as uncertainty instead of silently
+ * hiding most of the namespace.
+ */
+const MAX_COORDINATION_SCHEMA_SKIP_ROWS = 8;
+
+function recordCoordinationSkip(
+	directory: string,
+	skippedEntityKeys: string[],
+): void {
+	try {
+		writeDelegationHealthArtifact(directory, {
+			lastCoordinationSkip: {
+				reason:
+					'delegation coordination row failed schema validation (skipped by lenient read; writes and destructive cleanup stay fail-closed)',
+				at: Date.now(),
+				source: 'coordination-read-lenient',
+				skippedEntityKeys: skippedEntityKeys.slice(0, 64),
+				skippedCount: skippedEntityKeys.length,
+			},
+		});
+	} catch {
+		// The observation sink must never break the store.
+	}
+}
+
 function coordinationRowsToDelegations(
 	directory: string,
-): BackgroundDelegationRecord[] | null {
-	if (!projectDbExists(directory)) return null;
+	options?: { lenientSchemaSkips?: boolean },
+): CoordinationRowsRead {
+	if (!projectDbExists(directory)) {
+		return { records: null, skippedEntityKeys: [] };
+	}
+	const lenient = options?.lenientSchemaSkips === true;
+	const skippedEntityKeys: string[] = [];
 	try {
 		const rows = listCoordinationStates(
 			directory,
@@ -1459,7 +1505,7 @@ function coordinationRowsToDelegations(
 				`delegation coordination read reached its ${MAX_COORDINATION_STATE_LIST_ROWS}-row safety bound`,
 			);
 		}
-		return rows
+		const records = rows
 			.map((row) => {
 				const parsed = RecordSchema.safeParse(
 					JSON.parse(row.payload) as unknown,
@@ -1470,6 +1516,24 @@ function coordinationRowsToDelegations(
 				// payload identity), and the conflated message hid which one
 				// fired.
 				if (!parsed.success) {
+					// Lenient reads (advisory/status) skip a bounded number of
+					// schema-drifted rows instead of failing the whole
+					// namespace as uncertain — one drifted row (a writer from
+					// a newer plugin release whose vocabulary the current
+					// reader lacks) must not poison every count and status
+					// view. The skip is durably visible via the health
+					// artifact; write and destructive-cleanup paths keep
+					// reading strictly and refuse while any row is drifted.
+					if (
+						lenient &&
+						skippedEntityKeys.length < MAX_COORDINATION_SCHEMA_SKIP_ROWS
+					) {
+						skippedEntityKeys.push(row.entityKey);
+						logger.warn(
+							`[background] coordination row ${row.entityKey} failed schema validation; skipped by lenient read (${skippedEntityKeys.length}/${MAX_COORDINATION_SCHEMA_SKIP_ROWS})`,
+						);
+						return null;
+					}
 					throw new Error(
 						`delegation coordination row failed schema validation for ${row.entityKey}`,
 					);
@@ -1491,18 +1555,23 @@ function coordinationRowsToDelegations(
 				}
 				return parsed.data as BackgroundDelegationRecord;
 			})
+			.filter((record): record is BackgroundDelegationRecord => record !== null)
 			.sort((left, right) =>
 				left.createdAt === right.createdAt
 					? left.correlationId.localeCompare(right.correlationId)
 					: left.createdAt - right.createdAt,
 			);
+		if (lenient && skippedEntityKeys.length > 0) {
+			recordCoordinationSkip(directory, skippedEntityKeys);
+		}
+		return { records, skippedEntityKeys };
 	} catch (error) {
 		recordLedgerUncertainty(
 			directory,
 			error instanceof Error ? error.message : String(error),
 			'coordination-read',
 		);
-		return null;
+		return { records: null, skippedEntityKeys: [] };
 	}
 }
 
@@ -1588,12 +1657,27 @@ type DelegationCoordinationImportState = 'ready' | 'absent' | 'uncertain';
 function ensureDelegationCoordinationImported(
 	directory: string,
 	createIfNeeded: boolean,
+	readOptions?: { lenientSchemaSkips?: boolean },
 ): DelegationCoordinationImportState {
 	const dbExists = projectDbExists(directory);
 	if (!createIfNeeded && !dbExists) return 'absent';
-	const existing = dbExists ? coordinationRowsToDelegations(directory) : null;
-	if (dbExists && existing === null) return 'uncertain';
-	if (existing && existing.length > 0) {
+	const existing = dbExists
+		? coordinationRowsToDelegations(directory, readOptions)
+		: null;
+	const existingRecords = existing?.records ?? null;
+	if (dbExists && existingRecords === null) return 'uncertain';
+	// Lenient read where every row drifted (or the namespace is empty): with
+	// skipped rows present the legacy import must NOT run — it would try to
+	// re-import the legacy ledger over drifted-but-authoritative rows. This
+	// also keeps the shadow projection untouched (it must never be rewritten
+	// from partial truth).
+	if (
+		readOptions?.lenientSchemaSkips === true &&
+		existing?.skippedEntityKeys.length
+	) {
+		return 'ready';
+	}
+	if (existingRecords && existingRecords.length > 0) {
 		// Mutation callers already hold the store lock and rewrite the compatibility
 		// projection after a successful transition when it is absent. Avoid folding
 		// the entire ledger on every append; ordinary readers retain the full shadow
@@ -1603,7 +1687,7 @@ function ensureDelegationCoordinationImported(
 			projectionMarkerPath(storePath(directory)),
 		);
 		const shadowMatches =
-			markerPresent && delegationShadowMatches(directory, existing);
+			markerPresent && delegationShadowMatches(directory, existingRecords);
 		if (!shadowMatches) {
 			for (const filePath of [
 				storePath(directory),
@@ -1612,7 +1696,7 @@ function ensureDelegationCoordinationImported(
 			]) {
 				archiveShadowFileBestEffort(filePath);
 			}
-			writeDelegationShadowProjection(directory, existing);
+			writeDelegationShadowProjection(directory, existingRecords);
 		}
 		return 'ready';
 	}
@@ -2375,8 +2459,10 @@ function loadRecordsForWrite(
 	const importState = ensureDelegationCoordinationImported(directory, true);
 	if (importState === 'uncertain') return null;
 	if (importState === 'ready') {
+		// Strict by design: a mutation path refuses on ANY drifted row rather
+		// than append state derived from partial truth.
 		const coordination = coordinationRowsToDelegations(directory);
-		if (coordination !== null) return coordination;
+		if (coordination.records !== null) return coordination.records;
 		return null;
 	}
 	const load = loadFoldedState(directory, { strict: false });
@@ -2879,7 +2965,7 @@ function compactDelegationsLocked(
 ): CompactBackgroundDelegationsResult {
 	const hasAuthority = projectDbExists(directory);
 	const authoritative = hasAuthority
-		? coordinationRowsToDelegations(directory)
+		? coordinationRowsToDelegations(directory).records
 		: null;
 	const manifestRead = hasAuthority ? readDelegationManifest(directory) : null;
 	const checkpointRead = hasAuthority
@@ -3263,6 +3349,13 @@ export type DelegationReadOutcome =
 				| 'legacy-ledger'
 				| 'checkpoint+tail'
 				| 'checkpoint+ledger-suffix';
+			/**
+			 * Coordination rows whose payload failed schema validation and was
+			 * skipped by the lenient advisory read (bounded). Present only when
+			 * the read is partial: writes and destructive cleanup stay
+			 * fail-closed on these rows until the drift is repaired.
+			 */
+			skippedCoordinationRows?: string[];
 	  }
 	| {
 			status: 'uncertain';
@@ -3278,7 +3371,15 @@ export type DelegationReadOutcome =
 const DELEGATION_READ_REASON_MAX_CHARS = 200;
 
 function readDelegationLoadAttempt(directory: string): DelegationReadOutcome {
-	const importState = ensureDelegationCoordinationImported(directory, false);
+	// The ordinary advisory read is LENIENT towards schema-drifted
+	// coordination rows: one drifted row (a writer from a newer plugin release
+	// whose vocabulary the current reader lacks) must not make every status
+	// and count view report global uncertainty. Skipped rows are surfaced on
+	// the ok outcome and durably via the health artifact; write and
+	// destructive-cleanup paths keep their strict reads.
+	const importState = ensureDelegationCoordinationImported(directory, false, {
+		lenientSchemaSkips: true,
+	});
 	if (importState === 'uncertain') {
 		return {
 			status: 'uncertain',
@@ -3288,9 +3389,18 @@ function readDelegationLoadAttempt(directory: string): DelegationReadOutcome {
 		};
 	}
 	if (importState === 'ready') {
-		const coordination = coordinationRowsToDelegations(directory);
-		if (coordination !== null) {
-			return { status: 'ok', records: coordination, source: 'coordination' };
+		const coordination = coordinationRowsToDelegations(directory, {
+			lenientSchemaSkips: true,
+		});
+		if (coordination.records !== null) {
+			return {
+				status: 'ok',
+				records: coordination.records,
+				source: 'coordination',
+				...(coordination.skippedEntityKeys.length > 0
+					? { skippedCoordinationRows: coordination.skippedEntityKeys }
+					: {}),
+			};
 		}
 		// A ready SQLite authority that cannot be read (including the bounded
 		// pagination ceiling) is uncertainty, never a fall back to a possibly
@@ -3425,6 +3535,37 @@ export function readDelegationsDetailed(
 }
 
 /**
+ * Decision-scoped delegation read (#2703-review F-005). The ordinary
+ * {@link readDelegationsDetailed} is LENIENT towards schema-drifted
+ * coordination rows (bounded skips, surfaced via `skippedCoordinationRows`
+ * for status/advisory views), but a decision caller that checks only
+ * `status === 'uncertain'` reads a partially-skipped store as a complete
+ * truth — and in mixed-version/downgrade use the drifted rows are the
+ * NEWEST ones, so the decision can bind an older record (a sounding-board
+ * `evidenceTaskId`, a review-routing file list) as current. Every decision
+ * consumer therefore reads through this wrapper: a non-empty skip set is
+ * uncertainty, never a complete-looking older view. Status/advisory surfaces
+ * (status service, health artifact, `readDelegations` maintenance
+ * convenience) keep the lenient read and surface the skips.
+ */
+export function readDelegationsDetailedForDecisions(
+	directory: string,
+): DelegationReadOutcome {
+	const read = readDelegationsDetailed(directory);
+	const skippedCount =
+		read.status === 'ok' ? (read.skippedCoordinationRows?.length ?? 0) : 0;
+	if (read.status === 'ok' && skippedCount > 0) {
+		return {
+			status: 'uncertain',
+			reason: `delegation coordination rows skipped schema validation (${skippedCount} drifted row(s)); decision paths fail closed until the drift is repaired`,
+			source: 'coordination-read',
+			attempts: 1,
+		};
+	}
+	return read;
+}
+
+/**
  * Read and fold the store to the latest snapshot per correlationId. Lock-free and
  * defensive: a missing file yields an empty list, and malformed/partial lines are
  * skipped (never throws). Records are returned in first-seen correlationId order.
@@ -3471,10 +3612,10 @@ export function scanDelegationsForRecovery(
 	}
 	if (importState === 'ready') {
 		const coordination = coordinationRowsToDelegations(directory);
-		if (coordination !== null) {
+		if (coordination.records !== null) {
 			return {
 				status: 'ok',
-				owners: coordination,
+				owners: coordination.records,
 				source: 'checkpoint+tail',
 			};
 		}
@@ -3531,7 +3672,7 @@ export function findByCorrelationIdDetailed(
 	correlationId: string,
 ): DelegationLookupOutcome<BackgroundDelegationRecord | null> {
 	if (!correlationId) return { status: 'ok', value: null };
-	const read = readDelegationsDetailed(directory);
+	const read = readDelegationsDetailedForDecisions(directory);
 	if (read.status === 'uncertain') return read;
 	for (const record of read.records) {
 		if (record.correlationId === correlationId) {
@@ -3591,7 +3732,7 @@ function appendRecord(
 			);
 		}
 		if (!fs.existsSync(projectionMarkerPath(storePath(directory)))) {
-			const records = coordinationRowsToDelegations(directory);
+			const records = coordinationRowsToDelegations(directory).records;
 			if (records) writeDelegationShadowProjection(directory, records);
 		}
 		return;
@@ -6975,7 +7116,7 @@ export function findByBatchIdDetailed(
 	opts?: { parentSessionId?: string },
 ): DelegationLookupOutcome<BackgroundDelegationRecord[]> {
 	if (!batchId) return { status: 'ok', value: [] };
-	const read = readDelegationsDetailed(directory);
+	const read = readDelegationsDetailedForDecisions(directory);
 	if (read.status === 'uncertain') return read;
 	return {
 		status: 'ok',
@@ -7115,6 +7256,23 @@ function sweepStaleLocked(
 		if (excludeCorrelationIds?.has(record.correlationId)) continue;
 		if (!statuses.has(record.status)) continue;
 		if (now - record.updatedAt <= timeoutMs) continue;
+		// 2026-11-26 (task 2.15 liveness wedge): the store's `updatedAt` only
+		// proves the absence of STORE writes — a live child running a long
+		// operation writes nothing in between (observed live: three consecutive
+		// coder rounds stale-swept at the 30-minute mark while actively
+		// committing). The child-activity registry (fed by the v2 event pump)
+		// holds the OBSERVED liveness: a recent host event or an open tool
+		// call blocks the flip. An operator-forced sweep (#2971 terminal
+		// stamping) bypasses the guard — the audited operator decision wins.
+		// Unknown/quiet sessions never block: the historical store-age
+		// semantics apply unchanged (fail-open to the pre-registry behavior,
+		// including hosts without an event pump).
+		if (
+			limits.failureClass === undefined &&
+			childBlocksStaleSweep(record.correlationId, timeoutMs)
+		) {
+			continue;
+		}
 		// Issue #2615: the presumed-stale flip must carry a typed failure
 		// class so PR-review partial-coverage admission can settle a
 		// stale-swept dimension without abort_pr_workflow. 'liveness' marks a
@@ -7562,6 +7720,170 @@ export type CompletionDelegationLookupResult =
 	| CompletionDelegationLookup
 	| { source: 'uncertain'; record: null; uncertain: string };
 
+/**
+ * Durable task-binding fallback for sounding-board dispatches (the
+ * 2026-11-25 restart-era agent-gate wedge, layer B).
+ *
+ * A critic_sounding_board dispatch carries NO `task_id` argument — the task
+ * id rides only in free prompt prose ("…für Task 2.20…"), which the strict
+ * attribution policy correctly refuses to treat as dispatch attribution.
+ * Before the host-restart era the in-memory session fallback (currentTaskId)
+ * supplied the binding; after a restart that map is empty and the delegation
+ * record was persisted with planTaskId/evidenceTaskId null — the completion
+ * ingestion is then a no-op BY DEFINITION (taskId null → no Stage-B evidence
+ * side effects), so the sounding-board gate receipt can never land.
+ *
+ * This helper is the durable substitute for the lost session context: the
+ * LATEST coder delegation of the SAME parent session — the sounding-board
+ * context is the retry escalation of exactly that coder chain. Mirrors the
+ * in-memory recency semantics (latest record wins; >= resolves same-tick
+ * ties to the later store order, the fold's own last-write-wins).
+ *
+ * Fail-closed by construction: an uncertain store read yields
+ * `{ status: 'uncertain' }` and the caller keeps null (a task binding is
+ * never invented from a partial read).
+ */
+export function findLatestCoderTaskForParentSession(
+	directory: string,
+	parentSessionId: string,
+): { status: 'ok'; taskId: string | null } | { status: 'uncertain' } {
+	if (!parentSessionId) return { status: 'ok', taskId: null };
+	const read = readDelegationsDetailedForDecisions(directory);
+	if (read.status === 'uncertain') return { status: 'uncertain' };
+	let best: { taskId: string; updatedAt: number } | null = null;
+	for (const record of read.records) {
+		if (record.normalizedAgent !== 'coder') continue;
+		if (record.parentSessionId !== parentSessionId) continue;
+		const taskId = record.evidenceTaskId ?? record.planTaskId;
+		if (!taskId) continue;
+		if (best === null || record.updatedAt >= best.updatedAt) {
+			best = { taskId, updatedAt: record.updatedAt };
+		}
+	}
+	return { status: 'ok', taskId: best?.taskId ?? null };
+}
+
+/**
+ * Durable changed-files fallback for review routing (the 2026-11-24
+ * swarm_communication_debug agent-gate wedge).
+ *
+ * The dispatch-time review router reads the reviewed task's changed files from
+ * the PARENT SESSION's in-memory per-task attribution
+ * (`getModifiedFilesForTask`). A host restart wipes that map while the task's
+ * durable state survives, so every post-restart reviewer/test-engineer
+ * dispatch routed `NO_CHANGED_FILES` — the fail-open `review_route_router_error`
+ * receipt — and the completion-side enforcement (rightly) refuses that receipt
+ * terminally: the gate receipt never lands, the workflow rotates
+ * `stage_b_failed`, and the loop wedges (6 lost reviewer receipts across 3
+ * server instances in the debug log; the pre-restart 2.19 dispatch with a live
+ * in-memory map is the working counterexample).
+ *
+ * This helper reads the durable executed contract instead: the LATEST SETTLED
+ * coder delegation record for the task carries `coderSettlement.observedFiles`
+ * — the settled observed-file list the checkpoint contract calls "the
+ * executed-contract audit artifact — final and never recomputed". Selection
+ * mirrors the in-memory semantics EXACTLY (`recordModifiedFilesForTask`
+ * REPLACES the per-task list on every coder ingestion, so the latest settled
+ * leg's files — empty after a settled no-mutation leg — are what a live map
+ * would hold).
+ *
+ * Fail-closed by construction: an uncertain store read yields
+ * `{ status: 'uncertain' }` and the caller keeps today's behavior (never
+ * invents files). Bounded by the store's own read bounds — the same class as
+ * `findByCorrelationIdDetailed`.
+ */
+export function findLatestSettledCoderFilesForTask(
+	directory: string,
+	taskId: string,
+): { status: 'ok'; files: string[] } | { status: 'uncertain' } {
+	if (!taskId) return { status: 'ok', files: [] };
+	const read = readDelegationsDetailedForDecisions(directory);
+	if (read.status === 'uncertain') return { status: 'uncertain' };
+	let latest: { files: string[]; updatedAt: number } | null = null;
+	for (const record of read.records) {
+		if (record.normalizedAgent !== 'coder') continue;
+		const recordTaskId = record.evidenceTaskId ?? record.planTaskId;
+		if (recordTaskId !== taskId) continue;
+		const settlement = record.coderSettlement;
+		if (settlement?.state !== 'settled') continue;
+		// >= : a same-tick tie resolves to the later record in store order
+		// (the fold's own last-write-wins), mirroring how a live in-memory
+		// map would hold the most recent leg's files.
+		if (latest === null || settlement.updatedAt >= latest.updatedAt) {
+			latest = {
+				files: [...(settlement.observedFiles ?? [])],
+				updatedAt: settlement.updatedAt,
+			};
+		}
+	}
+	return { status: 'ok', files: latest?.files ?? [] };
+}
+
+/**
+ * Durable Stage-A settlement receipt for background-dispatched coder rounds
+ * (the 2026-11-26 task 2.14 wedge).
+ *
+ * A background coder round that reached a completed terminal, settled its
+ * coder settlement (state 'settled'), and had its completion durably
+ * consumed with ingestion outcome 'accepted' holds the same durable
+ * settlement fact the #2828 Stage-A recovery reads from a COMMITTED
+ * settlement WAL or a chain-verified accepted_mutation requirements
+ * receipt. For a verification-only round — the deliverable landed outside
+ * the delegation lane (e.g. user-committed after a liveness-stale
+ * predecessor, observed live: task 2.14, WAL ABORTED-by-transfer, zero
+ * observed files, ingestion accepted) — this settled record is the ONLY
+ * durable receipt that the round ran and completed. Without it the
+ * supervised recovery and the /swarm recover scan refuse with
+ * RECOVER_STAGE_A_SETTLEMENT_REQUIRED and the task wedges at idle with no
+ * agent-legal exit (recover_stage_a_task refuses, retry dispatches just
+ * re-settle no-mutation).
+ *
+ * Mirrors findLatestSettledCoderFilesForTask's read semantics: latest
+ * settlement by `updatedAt`, `>=` resolves same-tick ties to the later
+ * record in store order (the fold's own last-write-wins). Fail-closed: an
+ * uncertain store read yields `{ status: 'uncertain' }` and the caller
+ * keeps null — a justification is never invented from a partial read.
+ */
+export function findLatestSettledBackgroundCoderSettlement(
+	directory: string,
+	taskId: string,
+):
+	| {
+			status: 'ok';
+			settlement: {
+				correlationId: string;
+				settledAtMs: number;
+				observedFiles: string[];
+				ingestionOutcome: string | null;
+			} | null;
+	  }
+	| { status: 'uncertain' } {
+	if (!taskId) return { status: 'ok', settlement: null };
+	const read = readDelegationsDetailedForDecisions(directory);
+	if (read.status === 'uncertain') return { status: 'uncertain' };
+	let latest: {
+		correlationId: string;
+		settledAtMs: number;
+		observedFiles: string[];
+		ingestionOutcome: string | null;
+	} | null = null;
+	for (const record of read.records) {
+		if (record.normalizedAgent !== 'coder') continue;
+		const recordTaskId = record.evidenceTaskId ?? record.planTaskId;
+		if (recordTaskId !== taskId) continue;
+		const settlement = record.coderSettlement;
+		if (settlement?.state !== 'settled') continue;
+		if (latest === null || settlement.updatedAt >= latest.settledAtMs) {
+			latest = {
+				correlationId: record.correlationId,
+				settledAtMs: settlement.updatedAt,
+				observedFiles: [...(settlement.observedFiles ?? [])],
+				ingestionOutcome: record.ingestion?.outcome ?? null,
+			};
+		}
+	}
+	return { status: 'ok', settlement: latest };
+}
 /**
  * Lookup used by terminal handling: primary ledger first, exact fallback
  * second. Issue #2511: an uncertain primary read is returned typed — the
@@ -8276,6 +8598,59 @@ function hasProvenReleasedReservationOwner(
 	);
 }
 
+/**
+ * Workflow-settlement release proof for one background coder reservation
+ * (the 2026-11-27 task 2.18 stale-reservation wedge): the launch this
+ * reservation was minted for (task + callID) is durably finished on the
+ * WORKFLOW side — the architect settled its coder settlement
+ * (`state: 'COMMITTED'`, `accepted: true`) for exactly
+ * `coder:<reservation.callID>` — even though the delegation record never
+ * observed the child terminal (observer gap, restart, host event loss; the
+ * record stays `pending` and the sweep would renew the lease forever).
+ *
+ * The launch identity is exact: a settlement for any other dispatch of the
+ * task never proves this reservation idle, and a call-keyed reservation
+ * (`planTaskId === null`) has no settlement-WAL identity at all. Fail-closed:
+ * missing, unreadable, non-terminal, unaccepted, or foreign-transition WAL →
+ * not proven, the reservation stays.
+ */
+async function isReservationProvenReleasedByWorkflowSettlement(
+	directory: string,
+	reservation: BackgroundCoderReservation,
+): Promise<boolean> {
+	if (reservation.planTaskId === null) return false;
+	return isCommittedAcceptedSettlementForLaunch(
+		directory,
+		reservation.planTaskId,
+		`coder:${reservation.callID}`,
+	);
+}
+
+/**
+ * Record-level twin of the reservation proof above: the delegation record's
+ * OWN launch (planTaskId + callID) is durably settled on the workflow side.
+ * Used by admission capacity accounting so a `pending` record that never
+ * observed its child terminal (but whose launch the architect durably
+ * settled) no longer occupies the task's admission slot — the second
+ * duplicate_task source of the 2026-11-27 task 2.18 wedge (the reservation
+ * was reconciled away, the owner record still matched the task-keyed
+ * owner key). Same fail-closed identity bar: exact launch, COMMITTED,
+ * accepted.
+ */
+async function isRecordLaunchProvenSettledByWorkflow(
+	directory: string,
+	record: BackgroundDelegationRecord,
+): Promise<boolean> {
+	if (record.normalizedAgent !== 'coder' || record.planTaskId === null) {
+		return false;
+	}
+	return isCommittedAcceptedSettlementForLaunch(
+		directory,
+		record.planTaskId,
+		`coder:${record.callID}`,
+	);
+}
+
 function validateReservationIdentity(input: {
 	parentSessionId: string;
 	planTaskId: string | null;
@@ -8389,15 +8764,29 @@ export async function reserveBackgroundCoderSlot(
 				// finished. The reservation may still be unbound when a crash occurs
 				// after primary persistence, so reservation id + parent/task/call are
 				// the recovery identity. Ambiguous matches remain fail-closed.
-				const reservations = reservationScan.reservations.filter(
-					(reservation) => {
-						const primary = findExactPrimaryReservationOwner(
+				// The workflow-settlement arm (2026-11-27 task 2.18 wedge) adds the
+				// second durable proof: a COMMITTED accepted coder settlement for
+				// exactly this reservation's launch finishes the slot even when the
+				// delegation record never observed the child terminal.
+				const reservations: BackgroundCoderReservation[] = [];
+				for (const reservation of reservationScan.reservations) {
+					const primary = findExactPrimaryReservationOwner(
+						reservation,
+						ownerScan,
+					);
+					if (primary && hasProvenReleasedReservationOwner(primary)) {
+						continue;
+					}
+					if (
+						await isReservationProvenReleasedByWorkflowSettlement(
+							directory,
 							reservation,
-							ownerScan,
-						);
-						return !(primary && hasProvenReleasedReservationOwner(primary));
-					},
-				);
+						)
+					) {
+						continue;
+					}
+					reservations.push(reservation);
+				}
 				if (
 					reservations.length !== reservationScan.reservations.length &&
 					!(await writeBackgroundCoderReservations(directory, reservations))
@@ -8427,17 +8816,26 @@ export async function reserveBackgroundCoderSlot(
 				}
 				for (const record of ownerScan.recordsByCorrelation.values()) {
 					if (
-						record.parentSessionId === input.parentSessionId &&
-						isAdmissionActiveCoderOwner(record)
+						record.parentSessionId !== input.parentSessionId ||
+						!isAdmissionActiveCoderOwner(record)
 					) {
-						activeOwnerKeys.add(
-							reservationOwnerKey({
-								parentSessionId: record.parentSessionId,
-								planTaskId: record.planTaskId,
-								callID: record.callID,
-							}),
-						);
+						continue;
 					}
+					if (await isRecordLaunchProvenSettledByWorkflow(directory, record)) {
+						// Workflow-settled launch (2026-11-27 task 2.18 wedge): a
+						// pending record whose exact launch the architect durably
+						// settled (COMMITTED + accepted) does not occupy a live
+						// admission slot, even though it never observed its child
+						// terminal.
+						continue;
+					}
+					activeOwnerKeys.add(
+						reservationOwnerKey({
+							parentSessionId: record.parentSessionId,
+							planTaskId: record.planTaskId,
+							callID: record.callID,
+						}),
+					);
 				}
 
 				const reservationId = buildBackgroundCoderReservationId(input);
@@ -9097,6 +9495,38 @@ export async function maintainBackgroundDelegations(
 							correlationId: reservation.correlationId ?? undefined,
 							generation,
 							reason: 'proven-terminal-owner',
+						});
+						continue;
+					}
+					if (
+						await isReservationProvenReleasedByWorkflowSettlement(
+							directory,
+							reservation,
+						)
+					) {
+						// Workflow-settlement proof (2026-11-27 task 2.18 wedge): the
+						// architect durably settled the exact launch this reservation
+						// was minted for (COMMITTED + accepted, transitionId
+						// `coder:<callID>`), so the capacity claim is provably idle
+						// even though the delegation record never observed the child
+						// terminal. Proof-based release — same no-age class as the
+						// arm above; the exact-launch identity (task + callID)
+						// subsumes the #2104 generation guard because a newer launch
+						// mints a new callID and therefore never matches this WAL
+						// entry.
+						mutated = true;
+						result.released.push({
+							reservationId: reservation.reservationId,
+							generation,
+							reason: 'workflow-settlement-committed',
+						});
+						facts.push({
+							at: now,
+							kind: 'release',
+							reservationId: reservation.reservationId,
+							correlationId: reservation.correlationId ?? undefined,
+							generation,
+							reason: 'workflow settlement COMMITTED+accepted for this launch',
 						});
 						continue;
 					}

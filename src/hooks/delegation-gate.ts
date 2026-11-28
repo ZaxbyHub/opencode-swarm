@@ -18,7 +18,11 @@ import type {
 	BackgroundWorktreeDescriptor,
 	RecordPendingInput,
 } from '../background/pending-delegations.js';
-import { buildBackgroundCoderReservationId } from '../background/pending-delegations.js';
+import {
+	buildBackgroundCoderReservationId,
+	findLatestCoderTaskForParentSession,
+	findLatestSettledCoderFilesForTask,
+} from '../background/pending-delegations.js';
 import {
 	deleteStageBDispatchBindings,
 	readStageBDispatchBindings,
@@ -70,6 +74,7 @@ import { isReadOnlyTool } from '../full-auto/policy';
 import {
 	compareTaskWorkflowStateRank,
 	isTaskEvidenceReceiptRollbackFailure,
+	readTaskEvidenceRaw,
 } from '../gate-evidence';
 import { isMarkdownOnlyTaskChange } from '../gate-evidence-classification.js';
 import type { V2SubagentDialect } from '../host/v2/native-async-mode';
@@ -2970,6 +2975,46 @@ export function canRunWhileTaskAwaitsCompletion(input: {
 		return true;
 	}
 
+	// 2026-11-25 (tests_run catch-22, guard half): a Task dispatch that can
+	// still BIND gate evidence for the awaiting task is finishing work on
+	// that task, not new work — the completion gate must not block it.
+	// Live: task 2.20 (three required gates sounding-board+reviewer+TE) —
+	// whichever Stage-B gate bound second used to jump the workflow to
+	// tests_run and the guard then blocked the still-missing gate's
+	// dispatch in every order. The reducer half of the fix now counts
+	// required gates, but an advisory gate that binds AFTER the Stage-B
+	// pair (e.g. the escalation-required sounding-board receipt, which
+	// grows required_gates only through its own event) still needs this
+	// dispatch path open. Narrow: only the host Task tool, only gate
+	// agents, only a gate the awaiting task has NOT bound yet, and only a
+	// dispatch that is task-less (the sounding-board prose shape, bound
+	// durably at settlement) or explicitly for the awaiting task.
+	// Everything else keeps the completion remedy first-class.
+	if (
+		isTaskToolId(normalizedTool) &&
+		typeof input.args.subagent_type === 'string' &&
+		input.directory
+	) {
+		const targetAgent = stripKnownSwarmPrefix(String(input.args.subagent_type));
+		if (
+			TASK_GATE_AGENTS.has(targetAgent) &&
+			(input.requestedTaskId === null ||
+				input.requestedTaskId === input.awaitingTaskId)
+		) {
+			try {
+				const evidence = readTaskEvidenceRaw(
+					input.directory,
+					input.awaitingTaskId,
+				);
+				if (evidence && evidence.gates[targetAgent] == null) {
+					return true;
+				}
+			} catch {
+				// Fail closed: unreadable evidence keeps the block.
+			}
+		}
+	}
+
 	if (
 		input.directory &&
 		input.requestedTaskId &&
@@ -3506,6 +3551,21 @@ const maintainBackgroundDelegationsForDispatch: typeof import('../background/pen
  */
 export const _internals = {
 	isEpicOpenForProject,
+	/**
+	 * 2026-11-25 agent-gate wedge (layer B): the sounding-board dispatch task
+	 * binding reads through this seam so tests can drive the no-task_id +
+	 * settled-coder shape, the uncertain-store fail-closed shape, and the
+	 * no-coder-delegation refusal shape. Production never reassigns it.
+	 */
+	findLatestCoderTaskForParentSession,
+	/**
+	 * 2026-11-24 agent-gate wedge: the review-routing durable changed-files
+	 * fallback reads through this seam so tests can drive the empty-in-memory
+	 * + settled-coder shape, the uncertain-store fail-closed shape, and the
+	 * no-settlement refusal shape without hand-building the coordination store
+	 * for every case. Production never reassigns it.
+	 */
+	findLatestSettledCoderFilesForTask,
 	/**
 	 * #3403 (review round 3, AC2): the durable scope-claim is routed through this
 	 * seam so tests can drive a claim that THROWS and pin the throw-path lineage
@@ -5188,9 +5248,37 @@ export function createDelegationGateHook(
 					);
 					// Route against the exact reviewed task. The singular projection is
 					// compatibility-only and may point at a different concurrent task.
-					const changedFiles = reviewTaskId
+					let changedFiles = reviewTaskId
 						? getModifiedFilesForTask(reviewSession, reviewTaskId)
 						: [];
+					if (reviewTaskId !== null && changedFiles.length === 0) {
+						// 2026-11-24 swarm_communication_debug agent-gate wedge: a
+						// host restart wipes the parent session's in-memory per-task
+						// attribution while the durable coder settlement still holds
+						// the executed contract's observed files. Routing
+						// NO_CHANGED_FILES on that state writes a fail-open
+						// review_route_router_error receipt whose completion the
+						// enforcement boundary terminally refuses — the gate receipt
+						// never lands and the workflow rotates stage_b_failed (6
+						// lost reviewer receipts across 3 server instances; the
+						// pre-restart 2.19 dispatch with a live in-memory map is the
+						// working counterexample). Fall back to the LATEST SETTLED
+						// coder record's observedFiles — the same list a live map
+						// would hold (recordModifiedFilesForTask replaces per leg).
+						// Fail-closed: an uncertain store or no settled mutation
+						// keeps today's NO_CHANGED_FILES refusal — files are never
+						// invented for the router.
+						const durable = await _internals.findLatestSettledCoderFilesForTask(
+							directory,
+							reviewTaskId,
+						);
+						if (durable.status === 'ok' && durable.files.length > 0) {
+							changedFiles = durable.files;
+							logger.warn(
+								`[delegation-gate] review routing for task ${reviewTaskId} used the durable settled-coder fallback (${durable.files.length} files): the in-memory per-task attribution was empty (post-restart shape)`,
+							);
+						}
+					}
 					const routeTaskId = reviewTaskId ?? `unresolved-${input.callID}`;
 					routedTaskId = routeTaskId;
 					markStageBRouteRequired(reviewSession, routeTaskId);
@@ -5843,12 +5931,8 @@ export function createDelegationGateHook(
 		const session = ensureAgentSession(input.sessionID, undefined, directory);
 		if (!session || !session.taskWorkflowStates) return;
 
-		const {
-			getTaskWorkflowSnapshot,
-			readTaskEvidence,
-			readTaskEvidenceState,
-			transitionTaskWorkflowEvidence,
-		} = await import('../gate-evidence');
+		const { getTaskWorkflowSnapshot, readTaskEvidence, readTaskEvidenceState } =
+			await import('../gate-evidence');
 		const requestedScopeTaskId =
 			typeof args.task_id === 'string'
 				? args.task_id.trim()
@@ -5931,7 +6015,6 @@ export function createDelegationGateHook(
 			preparedScope = await prepareCoderScope(directory, input, args);
 		} catch (error) {
 			if (preflightTaskId) {
-				const transitionId = `coder-preflight:${input.callID}`;
 				const emptyScopePreflightFailure =
 					error instanceof Error &&
 					error.message.includes(
@@ -5941,11 +6024,9 @@ export function createDelegationGateHook(
 					emptyScopePreflightFailure &&
 					!extractTaskFileDirectives(args).present &&
 					(await hasExplicitEmptyPlanScope(directory, preflightTaskId));
-				let settled: Awaited<ReturnType<typeof settleCoderDispatch>> | null =
-					null;
 				if (explicitEmptyPlanScope && preflightWorkflow.generation === 0) {
 					try {
-						settled = await settleRejectedEmptyPlanScope(
+						await settleRejectedEmptyPlanScope(
 							directory,
 							input,
 							preflightTaskId,
@@ -5957,25 +6038,22 @@ export function createDelegationGateHook(
 						);
 					}
 				}
-				const failedWorkflow = getTaskWorkflowSnapshot(
-					settled?.evidence ??
-						(await transitionTaskWorkflowEvidence(directory, preflightTaskId, {
-							type: 'dispatch_no_mutation',
-							agentType: 'coder',
-							expectedGeneration: preflightWorkflow.generation,
-							transitionId,
-						})),
-				);
-				if (failedWorkflow.retryCount >= 3) {
-					await emitCoderRetryEscalation(directory, {
-						taskId: preflightTaskId,
-						generation: failedWorkflow.generation,
-						retryEpoch: failedWorkflow.retryEpoch,
-						rejectionCount: failedWorkflow.retryCount,
-						rejectionHistory: failedWorkflow.retryHistory,
-						action: 'sounding_board_consultation',
-					});
-				}
+				// 2026-11-26 (task 2.16 retry-circuit wedge): a scope-prep
+				// REFUSAL means no coder dispatch ever ran — it must not count
+				// as a coder retry failure. The pre-fix fallback wrote a
+				// `dispatch_no_mutation` transition for EVERY prepareCoderScope
+				// error, so gate-side refusals (scope conflicts, malformed
+				// dispatch shapes) self-escalated the retry circuit: observed
+				// live, one real provider-budget abort plus two refused
+				// dispatches reached the bounded retry threshold, burned the
+				// critic-guided simplified retry with another refusal, and
+				// wedged the task at TASK_RETRY_USER_ESCALATION_REQUIRED with
+				// no coder attempt in between. Only the EXPLICIT empty-plan-
+				// scope settlement above writes — it is the designed read-only
+				// dispatch flow (#2763/#3560), not a failure count. The retry
+				// escalation ladder itself runs on every dispatch attempt in
+				// enforceCoderRetryEscalation BEFORE the scope preflight and
+				// keeps its exact semantics.
 			}
 			throw error;
 		}
@@ -6800,12 +6878,79 @@ export function createDelegationGateHook(
 							const mergedArgs = { ...(storedArgs ?? {}), ...directArgs };
 							const normalizedSubagentType =
 								stripKnownSwarmPrefix(subagentType);
-							const evidenceTaskId = await resolveEvidenceTaskId(
+							let evidenceTaskId = await resolveEvidenceTaskId(
 								mergedArgs,
 								session,
 								directory,
 								evidenceTaskResolutionOptions(normalizedSubagentType),
 							);
+							// 2026-11-25 (layer D): workflow generation bound from
+							// durable task evidence when the in-memory generation
+							// map has no entry for this call/task (task-less SB
+							// dispatch resolved only here, in toolAfter).
+							let durableWorkflowGeneration: number | undefined;
+							if (
+								evidenceTaskId === null &&
+								normalizedSubagentType === 'critic_sounding_board'
+							) {
+								// 2026-11-25 swarm_communication_debug (restart-era
+								// agent-gate wedge, layer B): a sounding-board dispatch
+								// carries NO task_id argument — the task id rides only in
+								// free prompt prose, which the strict attribution policy
+								// correctly refuses. Before the host-restart era the
+								// in-memory session fallback (currentTaskId) supplied the
+								// binding; after a restart that map is empty and the
+								// record persisted task-less — the completion ingestion is
+								// then a no-op by definition (taskId null → no Stage-B
+								// evidence side effects) and the SB gate receipt can never
+								// land. Durable substitute for the lost session context:
+								// the LATEST coder delegation of the SAME parent session —
+								// the SB context is the retry escalation of exactly that
+								// coder chain. Fail-closed: an uncertain store or no coder
+								// delegation keeps null.
+								const durableTask =
+									await _internals.findLatestCoderTaskForParentSession(
+										directory,
+										input.sessionID,
+									);
+								if (
+									durableTask.status === 'ok' &&
+									durableTask.taskId !== null
+								) {
+									evidenceTaskId = durableTask.taskId;
+									logger.warn(
+										`[delegation-gate] sounding-board dispatch (call ${input.callID}) bound task ${evidenceTaskId} via the durable latest-coder fallback: no task_id argument and no in-memory session task context (post-restart shape)`,
+									);
+									// 2026-11-25 (layer D): the in-memory generation
+									// map (stageBDispatchGenerationsByCallID) is filled
+									// in the dispatch-preparation path keyed by the
+									// RESOLVED task id — which was null for a task-less
+									// SB dispatch, so the record would carry NO
+									// workflowGeneration and the completion ingestion
+									// refuses with TASK_WORKFLOW_GENERATION_REQUIRED
+									// forever (live: ses_ded837dfdffe, status
+									// ingestion_error, retryable loop, gate receipt
+									// never lands). Bind the workflow generation from
+									// the durable task evidence at dispatch time —
+									// the same fence input the in-memory map would
+									// hold.
+									try {
+										const gateEvidenceModule = await import('../gate-evidence');
+										const evidence = await gateEvidenceModule.readTaskEvidence(
+											directory,
+											evidenceTaskId,
+										);
+										durableWorkflowGeneration =
+											gateEvidenceModule.getTaskWorkflowSnapshot(
+												evidence,
+											)?.generation;
+									} catch {
+										// Fail closed: no readable evidence → no
+										// generation → the ingestion keeps its
+										// refusal instead of binding a wrong fence.
+									}
+								}
+							}
 							const scope =
 								session.declaredCoderScope &&
 								session.declaredCoderScope.length > 0
@@ -6892,10 +7037,18 @@ export function createDelegationGateHook(
 												: {};
 										})()
 									: {}),
+								// 2026-11-25 (layer D): fall back to the durable
+								// workflow generation bound from task evidence for
+								// task-less SB dispatches (the in-memory map is keyed
+								// by the resolved task id, which was null at
+								// dispatch-preparation time).
 								workflowGeneration: TASK_GATE_AGENTS.has(normalizedSubagentType)
-									? stageBDispatchGenerationsByCallID
+									? (stageBDispatchGenerationsByCallID
 											.get(input.callID)
-											?.get(evidenceTaskId ?? '')
+											?.get(evidenceTaskId ?? '') ??
+										(normalizedSubagentType === 'critic_sounding_board'
+											? durableWorkflowGeneration
+											: undefined))
 									: undefined,
 								worktree: standardDispatch
 									? {

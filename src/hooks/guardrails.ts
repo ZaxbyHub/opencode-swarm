@@ -32,6 +32,7 @@ export {
 export {
 	_internals,
 	createGuardrailsHooks,
+	emitDurableAttributionAdvisory,
 	enforceSpecDriftGate,
 	MAX_TRACKED_NO_OP_SESSIONS,
 	redactShellCommand,

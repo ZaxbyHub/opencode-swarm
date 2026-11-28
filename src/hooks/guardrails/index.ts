@@ -11,6 +11,7 @@ import * as fsSync from 'node:fs';
 import * as path from 'node:path';
 
 import { getSwarmAgents, resolveFallbackModel } from '../../agents/index';
+import { scopeSetContainsFile } from '../../background/stage-b-gates';
 import { WRITE_TOOL_NAMES } from '../../config/constants';
 import {
 	type AuthorityConfig,
@@ -270,6 +271,7 @@ function extractGateCallFiles(args: unknown): string[] | null {
 
 type DurableAttributionResult =
 	| { taskId: string }
+	| { awaitingStageA: string; acceptedSettlement: boolean }
 	| { ambiguous: string[] }
 	| { unbound: string; reason: 'files_mismatch' | 'truncated' }
 	| null;
@@ -283,12 +285,23 @@ type DurableAttributionResult =
  * AND whose flat evidence store still sits at `coder_delegated` — i.e. tasks
  * that are genuinely awaiting their Stage A write.
  *
+ * A second candidate class exists for the terminal-settlement wedge (the
+ * 2026-11-23 swarm_communication_debug pattern): a COMMITTED settlement —
+ * accepted or no-mutation — whose task workflow sits at `idle`/`blocked`
+ * with Stage A still unrecorded. The mechanical `stage_a_passed` write is
+ * deliberately fail-closed from those states, so attributing the gate run
+ * would only produce a TASK_WORKFLOW_CODER_MUTATION_REQUIRED denial; instead
+ * the caller routes the call as `terminal_settlement_wedge` and emits the
+ * precise recover_stage_a_task remediation. These candidates are reported
+ * through `{ awaitingStageA }` and never receive a mechanical write.
+ *
  * Conservative by design in three layers:
  * 1. Exactly one eligible (COMMITTED+accepted+coder_delegated) candidate is
  *    required. A lane still mid-dispatch (DISPATCHED/PREPARED) whose task is
  *    already at `coder_delegated` is not itself eligible but still widens
  *    the ambiguity set, so a second lane in flight cannot be silently
- *    invisible to this guard.
+ *    invisible to this guard. A terminal-settlement candidate widens the
+ *    ambiguity set the same way.
  * 2. A truncated settlement-WAL scan (more than 200 distinct historical
  *    task ids) cannot prove single-candidacy — a would-be second candidate
  *    could sort past the cap — so a truncated scan never resolves to a bare
@@ -300,9 +313,12 @@ type DurableAttributionResult =
  *    `pre_check_batch` run to the wrong task would corrupt the wrong task's
  *    lifecycle (the reducer accepts `stage_a_passed` from any
  *    `coder_delegated` state) or forge Stage-A proof for files that were
- *    never scanned.
+ *    never scanned. The same files-must-match rule gates the
+ *    `{ awaitingStageA }` arm: a wedge whose declared scope does not cover
+ *    the scanned files stays unattributed (null), and a truncated scan never
+ *    yields an `{ awaitingStageA }` resolution.
  *
- * Any of the three failure modes returns `{ unbound }` (attribution refused,
+ * Any of the failure modes returns `{ unbound }` (attribution refused,
  * advisory only) or `{ ambiguous }` rather than a guess. Zero candidates
  * means there is nothing durably attributable (the normal non-swarm flow)
  * and returns `null`.
@@ -320,6 +336,7 @@ async function resolveDurableGateTaskId(
 	try {
 		const { states, truncated } = await listCoderSettlementWalStates(directory);
 		const eligible: (typeof states)[number][] = [];
+		const awaitingStageA: (typeof states)[number][] = [];
 		const inFlightAtCoderDelegated = new Set<string>();
 		for (const state of states) {
 			if (!isStrictTaskId(state.taskId)) continue;
@@ -332,15 +349,62 @@ async function resolveDurableGateTaskId(
 				}
 				continue;
 			}
+			if (state.state === 'ABORTED') {
+				// 2026-11-26 swarm_communication_debug (task 2.17): the
+				// foreground settlement handed ownership to the durable
+				// background completion ("ownership transferred to durable
+				// background completion"), the background coder round then
+				// recorded its accepted mutation, and the task sat at
+				// coder_delegated awaiting a Stage A pass the pre_check
+				// self-report could not attribute — the only WAL carrying the
+				// declared scope is ABORTED, invisible to the COMMITTED arm
+				// below. The evidence is the authority for the state; the WAL
+				// only supplies the scope for binding. Eligibility demands
+				// the full live-wedge proof: coder_delegated, a LAST
+				// background accepted_mutation transition, and no recorded
+				// pre_check gate proof — a round that aborted without a
+				// mutation stays unattributed (its Stage A would be unearned)
+				// and keeps the human /swarm recover remediation.
+				const evidence = await readTaskEvidence(directory, state.taskId);
+				const workflow = getTaskWorkflowSnapshot(evidence);
+				if (
+					workflow.state === 'coder_delegated' &&
+					workflow.lastOutcome === 'accepted_mutation' &&
+					typeof workflow.lastTransitionId === 'string' &&
+					workflow.lastTransitionId.startsWith('background-coder:') &&
+					evidence?.gates?.pre_check === undefined
+				) {
+					eligible.push(state);
+				}
+				continue;
+			}
 			if (state.state !== 'COMMITTED') continue;
-			if (state.accepted !== true) continue;
 			const workflow = getTaskWorkflowSnapshot(
 				await readTaskEvidence(directory, state.taskId),
 			);
-			if (workflow.state === 'coder_delegated') eligible.push(state);
+			if (workflow.state === 'coder_delegated') {
+				if (state.accepted === true) eligible.push(state);
+				continue;
+			}
+			// Terminal-settlement wedge: Stage A still unrecorded while the
+			// durable settlement is already COMMITTED. Both accepted shapes
+			// count — the accepted-drift case (#2828) and the no-mutation
+			// case whose justification may come from a chain-verified
+			// requirements receipt (recover_stage_a_task resolves WAL-first,
+			// then requirements receipt). Authoritative evidence is required:
+			// recover_stage_a_task refuses a task without it, so a
+			// non-authoritative idle snapshot must not produce a wedge
+			// advisory whose sanctioned remediation would then be rejected.
+			if (
+				workflow.authoritative === true &&
+				(workflow.state === 'idle' || workflow.state === 'blocked')
+			) {
+				awaitingStageA.push(state);
+			}
 		}
 		const ambiguousIds = new Set<string>([
 			...eligible.map((s) => s.taskId),
+			...awaitingStageA.map((s) => s.taskId),
 			...inFlightAtCoderDelegated,
 		]);
 		if (ambiguousIds.size > 1) return { ambiguous: [...ambiguousIds].sort() };
@@ -365,10 +429,56 @@ async function resolveDurableGateTaskId(
 				// Exclude empty-string entries: an empty path is never a real
 				// file scope, and treating '' === '' as a match would bind on
 				// a shared "no scope declared" placeholder rather than a
-				// genuine file-scope intersection.
-				declared.some((f) => f !== '' && normalizedCallerFiles.includes(f));
+				// genuine file-scope intersection. Directory-valued declared
+				// entries bind through scopeSetContainsFile — a declared
+				// directory covers everything beneath it, the same predicate
+				// as the write-scope gate; exact-path-only matching made every
+				// directory-scoped background round's green pre_check fall
+				// out as files_mismatch (the 2026-11-26 2.17 wedge shape).
+				(() => {
+					const declaredSet = new Set(declared.filter((f) => f !== ''));
+					return normalizedCallerFiles.some((f) =>
+						scopeSetContainsFile(declaredSet, f),
+					);
+				})();
 			if (bound) return { taskId: candidate.taskId };
 			return { unbound: candidate.taskId, reason: 'files_mismatch' };
+		}
+		if (awaitingStageA.length === 1) {
+			const candidate = awaitingStageA[0];
+			// Same precision bar as the eligible arm, plus no truncated scan:
+			// a wedge advisory names a specific task and its sanctioned
+			// recovery, so it must not fire on cardinality the scan could not
+			// prove. Mismatch or truncation falls through to the generic
+			// unattributed outcome instead of guessing.
+			if (truncated) return null;
+			const declared = candidate.declaredFiles;
+			const normalizedCallerFiles =
+				callerFiles !== null ? normalizeScopeFiles(callerFiles) : null;
+			const bound =
+				normalizedCallerFiles !== null &&
+				normalizedCallerFiles.length > 0 &&
+				declared !== null &&
+				declared !== undefined &&
+				declared.length > 0 &&
+				// #2703 review LOW: same predicate as the eligible arm above —
+				// a declared DIRECTORY covers everything beneath it
+				// (scopeSetContainsFile), so a directory-scoped wedge gets the
+				// precise awaiting-Stage-A advisory instead of falling through
+				// to the generic one on exact-path-only matching.
+				(() => {
+					const declaredSet = new Set(declared.filter((f) => f !== ''));
+					return normalizedCallerFiles.some((f) =>
+						scopeSetContainsFile(declaredSet, f),
+					);
+				})();
+			if (bound) {
+				return {
+					awaitingStageA: candidate.taskId,
+					acceptedSettlement: candidate.accepted === true,
+				};
+			}
+			return null;
 		}
 		return null;
 	} catch (error) {
@@ -946,27 +1056,31 @@ export function createGuardrailsHooks(
 	// durable candidate, ambiguity, unbound). Session-keyed, bounded, and
 	// delete-on-read at its single consumption point in toolAfter — entries
 	// never survive a completed delivery (invariant 8; plan-critic R2-F2).
+	// The optional `taskId` is diagnostic-only: the terminal-settlement wedge
+	// route names the matched task in its bounded route event without ever
+	// attributing the gate run for a mechanical write.
 	const pendingGateRoutesBySession = new Map<
 		string,
-		Map<string, StageAGateRoute>
+		Map<string, { route: StageAGateRoute; taskId: string | null }>
 	>();
 	const takePendingGateRoute = (
 		sessionID: string,
 		callID: string,
-	): StageAGateRoute | undefined => {
+	): { route: StageAGateRoute; taskId: string | null } | undefined => {
 		const sessionRoutes = pendingGateRoutesBySession.get(sessionID);
-		const route = sessionRoutes?.get(callID);
+		const entry = sessionRoutes?.get(callID);
 		if (sessionRoutes) {
 			sessionRoutes.delete(callID);
 			if (sessionRoutes.size === 0)
 				pendingGateRoutesBySession.delete(sessionID);
 		}
-		return route;
+		return entry;
 	};
 	const rememberPendingGateRoute = (
 		sessionID: string,
 		callID: string,
 		route: StageAGateRoute,
+		taskId: string | null = null,
 	): void => {
 		let sessionRoutes = pendingGateRoutesBySession.get(sessionID);
 		if (!sessionRoutes) {
@@ -986,7 +1100,7 @@ export function createGuardrailsHooks(
 				'GATE_ROUTE_CAPACITY: this session has too many live gate calls; wait for a pending gate call to finish',
 			);
 		}
-		sessionRoutes.set(callID, route);
+		sessionRoutes.set(callID, { route, taskId });
 	};
 	const scopeLeaseRenewal = createScopeLeaseRenewalTracker();
 	const rememberReviewerScopeWrite = (input: {
@@ -1079,6 +1193,10 @@ export function createGuardrailsHooks(
 						? undefined
 						: swarmState.agentSessions.get(input.sessionID)?.currentTaskId;
 			let unattributableRoute: StageAGateRoute = 'no_task_correlation';
+			// Diagnostic-only task id for the terminal_settlement_wedge route:
+			// named in the bounded route event, never used for a mechanical
+			// Stage A write (the wedge class has none).
+			let wedgeTaskId: string | null = null;
 			// Parallel coders outside Epic: currentTaskId is the coder that
 			// returned LAST, so credit a pre_check_batch run (the gate whose
 			// verdict moves a task through Stage A) by its files instead
@@ -1125,6 +1243,26 @@ export function createGuardrailsHooks(
 				if (fallback) {
 					if ('taskId' in fallback) {
 						taskId = fallback.taskId;
+					} else if ('awaitingStageA' in fallback) {
+						// Terminal-settlement wedge (the 2026-11-23
+						// swarm_communication_debug pattern): the files match a
+						// task whose COMMITTED settlement already settled
+						// terminal and whose workflow sits at idle/blocked —
+						// the mechanical stage_a_passed write is fail-closed
+						// from those states, so attributing the run would only
+						// surface a TASK_WORKFLOW_CODER_MUTATION_REQUIRED
+						// denial whose remediation text assumes rework_required.
+						// Route the call to the wedge vocabulary and emit the
+						// precise sanctioned recovery instead (the architect-only,
+						// audited recover_stage_a_task path). No mechanical write
+						// is attempted for this class.
+						unattributableRoute = 'terminal_settlement_wedge';
+						wedgeTaskId = fallback.awaitingStageA;
+						emitDurableAttributionAdvisory(
+							input.sessionID,
+							`${effectiveDirectory}\u0000stage-a-terminal-settlement\u0000${fallback.awaitingStageA}`,
+							`STAGE A WEDGE (TERMINAL SETTLEMENT): this gate run matches task ${fallback.awaitingStageA}'s declared settlement scope, but the task's workflow sits at idle/blocked behind its terminal COMMITTED coder settlement${fallback.acceptedSettlement ? '' : ' (no mutation attributed)'} — the mechanical Stage A write cannot fire from that state, so a passing pre_check_batch result will NOT be recorded as Stage A evidence. Remediation: run recover_stage_a_task({task_id:"${fallback.awaitingStageA}", reason:"…"}) when the settlement (or a chain-verified requirements receipt) still justifies Stage A — architect-only, audited; otherwise dispatch a coder round that performs a real in-scope mutation, then re-run pre_check_batch.`,
+						);
 					} else if ('ambiguous' in fallback && fallback.ambiguous.length > 0) {
 						// Ambiguity and unbound/unverifiable are both durable-fallback
 						// attribution failures with no attributable task (issue #2664
@@ -1171,6 +1309,7 @@ export function createGuardrailsHooks(
 						input.sessionID,
 						input.callID,
 						unattributableRoute,
+						wedgeTaskId,
 					);
 				} catch (routeError) {
 					warn('Stage A route classification dropped at capacity', {
@@ -1328,11 +1467,34 @@ export function createGuardrailsHooks(
 						// still re-classifies as duplicate by design.
 						emitStageARoute('duplicate_result', sessionTaskId);
 					} else {
-						emitStageARoute(
-							takePendingGateRoute(input.sessionID, input.callID) ??
-								'no_task_correlation',
-							null,
+						const pendingRoute = takePendingGateRoute(
+							input.sessionID,
+							input.callID,
 						);
+						const route = pendingRoute?.route ?? 'no_task_correlation';
+						// A PASS verdict with no task correlation is the silent
+						// Stage A wedge: the architect sees `gates_passed: true`
+						// while the receipt is dropped, so Stage B dispatches
+						// are later denied with TASK_WORKFLOW_STAGE_A_REQUIRED —
+						// and without a committed settlement (background-
+						// dispatched coder rounds write no settlement WAL)
+						// /swarm recover cannot repair it either. Surface the
+						// dropped receipt as a visible, cooldown-gated advisory
+						// in addition to the bounded route event. The
+						// attribution_ambiguous and terminal_settlement_wedge
+						// routes are excluded: they already emitted their own,
+						// more specific advisory at
+						// toolBefore time. A FAIL needs no advisory here: the
+						// failure is already the tool's own visible output, so
+						// no signal is silently lost.
+						if (verdict.kind === 'pass' && route === 'no_task_correlation') {
+							emitDurableAttributionAdvisory(
+								input.sessionID,
+								`${effectiveDirectory}\u0000stage-a-unattributed-pass`,
+								'STAGE A RECEIPT NOT ATTRIBUTED: pre_check_batch passed but the result could not be attributed to any task — no session task correlation (in-memory state wiped by a restart or reset, or the tool call bypassed the plugin tool hooks) and no durable settlement candidate (background-dispatched coder rounds write no settlement WAL). The green result was NOT recorded as Stage A evidence; reviewer/test_engineer dispatches will be denied with TASK_WORKFLOW_STAGE_A_REQUIRED, and /swarm recover cannot repair this wedge class without a committed settlement. Remediation: if a background coder round for this task just completed, run /swarm recover <task> to settle its stale settlement, then re-run pre_check_batch; otherwise dispatch a coder round that performs a real in-scope mutation, then re-run pre_check_batch. If this was an ad-hoc gate run with no task in flight, no action is needed.',
+							);
+						}
+						emitStageARoute(route, pendingRoute?.taskId ?? null);
 					}
 				} catch (routeError) {
 					warn('Stage A route classification failed', {
@@ -1381,46 +1543,81 @@ export function createGuardrailsHooks(
 									isStrictTaskId(taskId) ? taskId : null,
 								);
 							}
-							if (verdict.kind === 'fail' && isStrictTaskId(taskId))
-								try {
-									const updated = await transitionTaskWorkflowEvidence(
-										effectiveDirectory,
-										taskId,
-										{
-											type: 'stage_a_failed',
-											expectedGeneration: pendingGateTask.generation,
-											transitionId: `pre-check:${input.callID}`,
-										},
+							if (verdict.kind === 'fail' && isStrictTaskId(taskId)) {
+								// 2026-11-27 (task 2.18 retry-circuit wedge): an
+								// infrastructure-only pre_check failure (gate
+								// execution/persistence error — the durable stock
+								// or the environment failed, nothing about the
+								// coder's content was rejected) must not consume
+								// the task's retry budget or wedge its workflow
+								// state. Observed live: the sast_scan evidence
+								// bundle crossed its byte cap, EVERY further gate
+								// run's save threw, each run recorded
+								// stage_a_failed, and the task burned its full
+								// retry contingency on infrastructure alone —
+								// TASK_RETRY_USER_ESCALATION_REQUIRED with no
+								// coder attempt ever failing on content. The
+								// transition is therefore not written at all
+								// (same writer-level pattern as the scope-prep
+								// refusal fix): retryCount, retryHistory,
+								// lastOutcome, and the state stay untouched; the
+								// architect sees a bounded route event plus an
+								// always-visible advisory and simply re-runs the
+								// gate once the environment is repaired.
+								if (verdict.cause === 'infrastructure') {
+									emitStageARoute('pre_check_infra_failed', taskId);
+									pushAdvisory(
+										session,
+										`STAGE A FAILED ON INFRASTRUCTURE for task ${taskId}: pre_check_batch failed on a gate execution/persistence error (e.g. a missing tool, a scan-process failure, or an evidence-bundle write error), not on the code under gate. The task's retry budget and workflow state are UNTOUCHED — do not re-dispatch a coder for this. Remediation: repair the environment or the reported storage condition, then re-run pre_check_batch.`,
 									);
-									const next = getTaskWorkflowSnapshot(updated);
-									session.taskWorkflowStates.set(taskId, next.state);
-									updateTaskWorkflowCache(session, taskId, next);
-									emitStageARoute('pre_check_failed', taskId);
-								} catch (err) {
-									const code = stageAWriteErrorCode(err);
-									if (code && STAGE_A_CODER_MUTATION_REQUIRED_CODES.has(code)) {
-										logger.criticalWarn(
-											`[guardrails] Stage A failure write failed for task ${taskId}: ${code}. An accepted coder mutation is required before Stage A can be recorded again. If the task is rework_required because Stage B did not require a code change, the architect-only recover_rework_task path is valid after fresh green pre_check_batch proof; for a genuine defect, dispatch a coder for a real code change, and mark the task blocked only when neither path applies.`,
-										);
-										pushAdvisory(
-											session,
-											`STAGE A WRITE FAILED (${code}) for task ${taskId}: pre_check_batch failed but an accepted coder mutation is required before Stage A can be recorded again. If the task is rework_required because Stage B did not require a code change, the architect-only recover_rework_task path is valid after fresh green pre_check_batch proof; for a genuine defect, dispatch a coder for a real code change, and mark the task blocked only when neither path applies.`,
-										);
-									} else if (code && STAGE_A_ATTRIBUTION_MISS_CODES.has(code)) {
-										logger.criticalWarn(
-											`[guardrails] Stage A failure write failed for task ${taskId}: ${code}. Run /swarm recover ${taskId}.`,
-										);
-										pushAdvisory(
-											session,
-											`STAGE A WRITE FAILED (${code}) for task ${taskId}: pre_check_batch failed but the rework transition was rejected. Run /swarm recover ${taskId} to repair attribution.`,
-										);
-									} else {
-										warn('Failed to persist Stage A failure', {
+								} else {
+									try {
+										const updated = await transitionTaskWorkflowEvidence(
+											effectiveDirectory,
 											taskId,
-											error: String(err),
-										});
+											{
+												type: 'stage_a_failed',
+												expectedGeneration: pendingGateTask.generation,
+												transitionId: `pre-check:${input.callID}`,
+											},
+										);
+										const next = getTaskWorkflowSnapshot(updated);
+										session.taskWorkflowStates.set(taskId, next.state);
+										updateTaskWorkflowCache(session, taskId, next);
+										emitStageARoute('pre_check_failed', taskId);
+									} catch (err) {
+										const code = stageAWriteErrorCode(err);
+										if (
+											code &&
+											STAGE_A_CODER_MUTATION_REQUIRED_CODES.has(code)
+										) {
+											logger.criticalWarn(
+												`[guardrails] Stage A failure write failed for task ${taskId}: ${code}. An accepted coder mutation is required before Stage A can be recorded again. If the task is rework_required because Stage B did not require a code change, the architect-only recover_rework_task path is valid after fresh green pre_check_batch proof; for a genuine defect, dispatch a coder for a real code change, and mark the task blocked only when neither path applies.`,
+											);
+											pushAdvisory(
+												session,
+												`STAGE A WRITE FAILED (${code}) for task ${taskId}: pre_check_batch failed but an accepted coder mutation is required before Stage A can be recorded again. If the task is rework_required because Stage B did not require a code change, the architect-only recover_rework_task path is valid after fresh green pre_check_batch proof; for a genuine defect, dispatch a coder for a real code change, and mark the task blocked only when neither path applies.`,
+											);
+										} else if (
+											code &&
+											STAGE_A_ATTRIBUTION_MISS_CODES.has(code)
+										) {
+											logger.criticalWarn(
+												`[guardrails] Stage A failure write failed for task ${taskId}: ${code}. Run /swarm recover ${taskId}.`,
+											);
+											pushAdvisory(
+												session,
+												`STAGE A WRITE FAILED (${code}) for task ${taskId}: pre_check_batch failed but the rework transition was rejected. Run /swarm recover ${taskId} to repair attribution.`,
+											);
+										} else {
+											warn('Failed to persist Stage A failure', {
+												taskId,
+												error: String(err),
+											});
+										}
 									}
 								}
+							}
 						} else if (verdict.kind === 'pass') {
 							if (
 								session.lastGateFailure?.taskId === taskId &&

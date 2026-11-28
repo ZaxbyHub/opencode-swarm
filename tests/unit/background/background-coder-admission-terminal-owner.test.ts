@@ -1,7 +1,7 @@
 /**
  * Regression: terminal-child coder owners must not hold admission capacity.
  *
- * Wild failure (Wirtschaftssimulation session, 2026-11-22): a background
+ * Wild failure (consumer-project session, 2026-11-22): a background
  * coder finished its work — trusted terminal `completed`, settlement
  * `settled` — but the single ingestion attempt into the parent session
  * failed, leaving its delegation record in `ingestion_error` forever. The

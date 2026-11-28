@@ -48,6 +48,9 @@ describe('decodePreCheckResult', () => {
 		expect(decodePreCheckResult(result(false))).toEqual({
 			kind: 'fail',
 			code: 'PRE_CHECK_FAILED',
+			// No gate failed at all — a contradictory aggregate is unprovable,
+			// therefore content (conservative default).
+			cause: 'content',
 		});
 	});
 
@@ -279,7 +282,12 @@ describe('decodePreCheckResult', () => {
 					quality_budget: allSkipped,
 				}),
 			),
-		).toEqual({ kind: 'fail', code: 'PRE_CHECK_INPUT_INVALID' });
+		).toEqual({
+			kind: 'fail',
+			code: 'PRE_CHECK_INPUT_INVALID',
+			// A malformed batch INPUT rejected the call, not the content.
+			cause: 'infrastructure',
+		});
 	});
 
 	test.each([

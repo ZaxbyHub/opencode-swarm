@@ -182,6 +182,74 @@ describe('classifyFile - generated zone', () => {
 	});
 });
 
+describe('classifyFile - state zone (.swarm/ runtime state)', () => {
+	test('returns state zone for .swarm/loop run state files (not config)', () => {
+		// The 2026-11-23 swarm_communication_debug AUTHORITY_POLICY_DENY wedge:
+		// the loop skill instructs the architect to write this file after every
+		// gate transition. It must never classify as config (the architect's
+		// default blockedZones) — zone blocks cannot be overridden by allows.
+		const result = classifyFile(
+			'.swarm/loop/mainstream-model-20261121T1646Z/state.json',
+		);
+		expect(result.zone).toBe('state');
+		expect(result.confidence).toBe('high');
+	});
+
+	test('the state zone is ONLY .swarm/loop — gate-integrity surfaces keep their base zones (#2703-review F-004)', () => {
+		// A blanket `.swarm/ → state` re-zoned the gate-integrity surfaces out
+		// of the architect's blockedZones ('config'), re-opening architect
+		// writes to evidence bundles, route receipts, full-auto state, session
+		// state, and the ledger projections. They must stay in their base
+		// classifications so the #894 block keeps biting.
+		expect(classifyFile('.swarm/evidence/secretscan.json').zone).toBe('config');
+		expect(classifyFile('.swarm/evidence/1.1/evidence.json').zone).toBe(
+			'config',
+		);
+		expect(classifyFile('.swarm/evidence/1.8.json').zone).toBe('config');
+		expect(classifyFile('.swarm/pr-review/route-receipts/x.json').zone).toBe(
+			'config',
+		);
+		expect(classifyFile('.swarm/full-auto-state.json').zone).toBe('config');
+		expect(classifyFile('.swarm/session/abc.json').zone).toBe('config');
+		expect(classifyFile('/project/.swarm/lane-results/x.json').zone).toBe(
+			'config',
+		);
+		expect(classifyFile('.swarm/plan-ledger.jsonl').zone).toBe('production');
+		expect(classifyFile('.swarm/background-delegations.jsonl').zone).toBe(
+			'production',
+		);
+	});
+
+	test('keeps .swarm/checkpoints/ in the generated zone (rule order)', () => {
+		expect(classifyFile('.swarm/checkpoints/snapshot.json').zone).toBe(
+			'generated',
+		);
+	});
+
+	test('plan projections classify at their base zones; their architect block is exact-path, not zone', () => {
+		// .swarm/plan.md/.swarm/plan.json stay architect-blocked through
+		// blockedExact — the zone classification must not weaken that, and
+		// neither projection needs the state zone for its protection.
+		expect(classifyFile('.swarm/plan.json').zone).toBe('config');
+		expect(classifyFile('.swarm/plan.md').zone).toBe('production');
+	});
+
+	test('project config files outside .swarm/ still classify as config', () => {
+		expect(classifyFile('biome.json').zone).toBe('config');
+		expect(classifyFile('configs/app.yaml').zone).toBe('config');
+		expect(classifyFile('src/tsconfig.json').zone).toBe('config');
+	});
+
+	test('getZonePolicy exposes a skip-QA policy for the state zone', () => {
+		const policy = getZonePolicy('state');
+		expect(policy.qaDepth).toBe('skip');
+		expect(policy.lintRequired).toBe(false);
+		expect(policy.testRequired).toBe(false);
+		expect(policy.reviewRequired).toBe(false);
+		expect(policy.securityReviewRequired).toBe(false);
+	});
+});
+
 describe('classifyFile - docs zone', () => {
 	test('returns docs zone for docs/** files', () => {
 		const result = classifyFile('/project/docs/guide.md');

@@ -54,7 +54,7 @@ import {
 	findByCorrelationId,
 	findByCorrelationIdDetailed,
 	isTerminalDelegationStatus,
-	readDelegationsDetailed,
+	readDelegationsDetailedForDecisions,
 	registerStaleSweepObserver,
 } from './pending-delegations.js';
 
@@ -771,7 +771,7 @@ export async function recoverTerminalLaneReceipts(
 	// Issue #2511 (audited safe-skip): an uncertain enumeration read defers
 	// this pass — replays are ledger-idempotent, so a later healthy trigger
 	// (collect invocation or session-close maintenance) loses nothing.
-	const enumeration = readDelegationsDetailed(directory);
+	const enumeration = readDelegationsDetailedForDecisions(directory);
 	if (enumeration.status === 'uncertain') {
 		logger.warn(
 			`[delegation-lifecycle] terminal-lane receipt recovery deferred: delegation store unreadable after ${enumeration.attempts} attempts (${enumeration.reason})`,

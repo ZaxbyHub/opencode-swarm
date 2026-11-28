@@ -2822,7 +2822,15 @@ export const AgentAuthorityRuleSchema = z.object({
 	allowedPrefix: z.array(z.string()).optional(),
 	blockedZones: z
 		.array(
-			z.enum(['production', 'test', 'config', 'generated', 'docs', 'build']),
+			z.enum([
+				'production',
+				'test',
+				'config',
+				'generated',
+				'docs',
+				'build',
+				'state',
+			]),
 		)
 		.optional(),
 	blockedGlobs: z.array(z.string()).optional(),

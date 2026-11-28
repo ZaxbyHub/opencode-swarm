@@ -125,3 +125,25 @@ export function readRepairEvents(directory: string): Record<string, unknown>[] {
 		.map((line) => JSON.parse(line) as Record<string, unknown>)
 		.filter((event) => event.type === 'stage_a_repair');
 }
+
+/**
+ * Remove the task-gate-requirements receipt ledger for a task so the fixture
+ * carries NO durable settlement receipt at all (settleAt's accepted_mutation
+ * transition writes one). Used by the "nothing justifies repair" pins: since
+ * the requirements-receipt fallback, a chain-verified accepted_mutation
+ * receipt alone justifies the settlement-wedge recovery, so those pins must
+ * strip the ledger to stay receipt-less.
+ */
+export function stripRequirementsLedger(
+	directory: string,
+	taskId: string,
+): void {
+	const ledgerPath = path.join(
+		directory,
+		'.swarm',
+		'evidence',
+		'task-gate-requirements',
+		`${taskId}.jsonl`,
+	);
+	fs.rmSync(ledgerPath, { force: true });
+}

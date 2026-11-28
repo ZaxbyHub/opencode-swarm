@@ -70,7 +70,7 @@ describe('findInFlightCoderWork', () => {
 	});
 
 	test('uncertain background store (no DB) fails closed', async () => {
-		_internals.readDelegationsDetailed = (() => ({
+		_internals.readDelegationsDetailedForDecisions = (() => ({
 			status: 'uncertain',
 			reason: 'torn',
 		})) as never;

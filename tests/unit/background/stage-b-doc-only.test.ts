@@ -132,7 +132,7 @@ describe('background doc-only gate evidence', () => {
 	});
 
 	test('regression: exempt task with a test-engineer-demanding route receipt is not wedged at reviewer_run', async () => {
-		// Production shape (Wirtschaftssimulation session 29b8ccea, task 1.8):
+		// Production shape (consumer-project session 29b8ccea, task 1.8):
 		// the dispatch-time route receipt demanded 1 reviewer + 1 test engineer
 		// even though the durable evidence proves test_engineer_exempt
 		// (docs-only AGENTS.md change). The Stage-B completeness barrier then

@@ -34,6 +34,7 @@ import {
 import {
 	discardReviewerScopeGenerationClaim,
 	discardReviewerScopeGenerationForCoderCall,
+	recordPhaseAgentDispatch,
 	swarmState,
 } from '../state.js';
 import { pushAdvisory } from '../utils/advisory-queue';
@@ -1525,10 +1526,33 @@ export function createBackgroundCompletionObserver(opts: {
 					ingestion?.disposition === 'claimed' ||
 					ingestion?.disposition === 'retry'
 				) {
+					// 2026-11-25 swarm_communication_debug (restart-era agent-gate
+					// wedge, layer A): the store's result projection can be
+					// BODY-LESS — the checkpoint fold strips the text/error bodies
+					// from closed summaries, and a trustedTerminal replay or a
+					// duplicate claim can surface that body-less shape even for a
+					// LIVE record (observed live: a coordination row with
+					// result={chars,digest,truncated} and NO text one second after
+					// a text-bearing terminal claim). Preferring that body-less
+					// record.result over THIS event's result silenced every Stage-B
+					// verdict: structuredStageBVerdict got '' for the text, matched
+					// nothing, and the ingestion rotated stage_b_failed + rejected
+					// — the exact "dispatches fire, receipts never land" pattern
+					// since the 2.3-native-async era began. The event result is the
+					// authority here: it is parsed from the host-rendered subagent
+					// envelope on THIS invocation (full wrapper text, bounded).
+					// Fall back to it whenever the persisted result has no body at
+					// all; keep the record's copy only when it carries text/error
+					// (replay paths where no event result exists).
+					const recordResult = ingestion.record.result;
+					const recordResultHasBody =
+						recordResult !== undefined &&
+						((recordResult.text ?? '') !== '' ||
+							(recordResult.error ?? '') !== '');
 					const applied = await ingestBackgroundStageBCompletion({
 						directory,
 						record: ingestion.record,
-						result: ingestion.record.result ?? result,
+						result: recordResultHasBody && recordResult ? recordResult : result,
 						reviewerReceiptOptions: opts.reviewerReceiptOptions as
 							| import('../hooks/review-receipt-collector.js').ReviewerReceiptValidationOptions
 							| undefined,
@@ -1781,6 +1805,26 @@ export function createBackgroundCompletionObserver(opts: {
 					);
 				}
 			}
+
+			// Foreground Task dispatches register the dispatched role on the
+			// child session through the delegation tracker (chat.message); a
+			// background child never flows through those hooks, so the
+			// in-memory phase-aggregation surface stayed empty and phase_complete
+			// reported REQUIRED_AGENTS_MISSING with agentsDispatched: [] even
+			// though the role demonstrably ran and its gate receipts landed (the
+			// 2026-11-23 swarm_communication_debug pattern). Record the completed
+			// role on the dispatching parent session — the same surface
+			// recordPhaseAgentDispatch writes for foreground dispatches. This is
+			// the live-process surface only; durable cross-restart coverage for
+			// coder/reviewer/test_engineer stays with the per-task gate evidence
+			// (the phase_complete task-gate inference) and for docs with the
+			// durable participation store above. No-op when the parent session is
+			// not live in memory (post-restart replay); idempotent by set
+			// semantics on replay.
+			recordPhaseAgentDispatch(
+				record.parentSessionId,
+				record.swarmPrefixedAgent,
+			);
 
 			// Epic v2 C3 (X1) seam: a background non-coder writer that served
 			// a task of the open epic has its attributed main-tree writes

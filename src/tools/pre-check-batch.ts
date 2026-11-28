@@ -44,6 +44,7 @@ import {
 	runSecretscanOnFiles,
 	SECRETSCAN_MAX_FINDINGS,
 } from './secretscan';
+import { reportToolSideStageA } from './stage-a-self-report';
 
 // ============ Constants ============
 const TOOL_TIMEOUT_MS = 60_000;
@@ -3831,7 +3832,26 @@ export const pre_check_batch: ReturnType<typeof tool> = createSwarmTool({
 				ctx?.abort,
 			);
 
-			return serializePreCheckResult(result);
+			const serialized = serializePreCheckResult(result);
+			// OpenCode 2.3.1/2.3.2 regression (anomalyco/opencode#65742): nested
+			// Code Mode tool calls no longer dispatch plugin tool hooks, so the
+			// guardrails toolAfter Stage A receipt never fires when this tool is
+			// invoked through `execute` — the common architect pattern. Re-issue
+			// the receipt from inside the tool. Idempotent with the hook path
+			// (duplicate guard + reducer idempotency); fail-open by contract.
+			// Gated on a real session context (always present in host
+			// invocations) so context-free consumers and tests see no durable
+			// side effects.
+			if (typeof ctx?.sessionID === 'string' && ctx.sessionID !== '') {
+				await reportToolSideStageA({
+					sessionID: ctx.sessionID,
+					directory: resolvedDirectory,
+					serializedResult: serialized,
+					files: typedArgs.files,
+					toolCallId: `self:${ctx.sessionID}:${Date.now().toString(36)}`,
+				});
+			}
+			return serialized;
 		} catch (error) {
 			const errorMessage =
 				error instanceof Error ? error.message : 'Unknown error';

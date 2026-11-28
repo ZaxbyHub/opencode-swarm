@@ -10,7 +10,7 @@
 
 The issue #2271 bug 3 fix (non-code-only diffs are a legitimate nothing-to-scan PASS) was guarded by `!baselineUsed`. `pre_check_batch` always passes `phase` to `sast_scan`, so as soon as any earlier task in the phase captured a SAST baseline, every subsequent non-code-only task fell into the zero-coverage hard fail instead of the non-code pass. A baseline cannot make non-code files scannable, and zero scannable inputs cannot produce new findings, so the guard had no protective value. Secrets scanning is a separate hard gate and is unchanged.
 
-Found in the Wirtschaftssimulation loop (session `43d6d1c3-a28f-42f0-851c-056ecc216587`, task 1.8): the task's scope was exclusively `AGENTS.md`, earlier phase-1 code tasks had captured a SAST baseline, and `pre_check_batch` scanned 0 files, giving `failure_kind: coverage` and `gates_passed: false`.
+Found in the consumer-project loop (session `43d6d1c3-a28f-42f0-851c-056ecc216587`, task 1.8): the task's scope was exclusively `AGENTS.md`, earlier phase-1 code tasks had captured a SAST baseline, and `pre_check_batch` scanned 0 files, giving `failure_kind: coverage` and `gates_passed: false`.
 
 ## Migration steps
 

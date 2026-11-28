@@ -9280,9 +9280,331 @@ export function neutralizeQuotedHeredocBodies(command: string): string {
 	return hadTrailingNewline ? `${joined}\n` : joined;
 }
 
+/**
+ * bash-parser 0.5.0 cannot parse a compound statement nested inside another
+ * compound body — `for …; do if …; fi; done`, `while …; do for …; done; done`,
+ * `if …; then for …; done; fi` all throw ("Unexpected 'Then'/'Do'/'In'") even
+ * though they are bog-standard POSIX shell. Every such command used to land
+ * on the fail-closed parseError denial, blocking purely read-only diagnostic
+ * pipelines (observed live: `for d in …; do if [ -d "$d" ]; then grep …; fi;
+ * done`).
+ *
+ * Structural decomposition closes that gap without weakening detection: the
+ * qualifying block BODIES are replaced by the inert POSIX no-op `:` in a
+ * SKELETON (keeping the loop heads / if conditions and branch structure /
+ * `done`-redirects / everything outside the bodies), and every REAL body is
+ * analyzed as its own fragment. Every byte of the original command is
+ * analyzed in exactly one piece (skeleton ⊇ everything except the bodies;
+ * fragments ⊇ the bodies); writes are UNIONed, so a write anywhere is a
+ * write of the whole. Any piece that still fails to parse keeps the
+ * fail-closed parseError.
+ */
+interface NestedCompoundBlockSplit {
+	/** Command with every qualifying block body replaced by the inert `:`. */
+	skeleton: string;
+	/** The real bodies, analyzed as their own POSIX command lines. */
+	bodies: string[];
+}
+
+/** Compound-body keywords that make a block qualify for decomposition. */
+const NESTED_COMPOUND_KEYWORDS = [
+	'if',
+	'for',
+	'while',
+	'until',
+	'case',
+] as const;
+
+/** Recursion bound for decomposed fragments that themselves need splitting. */
+const NESTED_COMPOUND_SPLIT_DEPTH_MAX = 2;
+
+/** Keyword terminators: a keyword must be a whole word at a token boundary. */
+function isKeywordBoundaryChar(char: string | undefined): boolean {
+	return (
+		char === undefined ||
+		char === '' ||
+		/\s/.test(char) ||
+		';|&()<>{}\n'.includes(char)
+	);
+}
+
+type CompoundStackEntry =
+	| { type: 'loopHead' }
+	| { type: 'loopBody'; bodyStart: number }
+	| { type: 'ifHead' }
+	| { type: 'ifBranch'; branchStarts: number[] };
+
+/**
+ * Quote- and substitution-aware scan for compound blocks (for/while/until …
+ * do … done, if … then … elif … else … fi) whose body contains a nested
+ * compound keyword. Returns the skeleton-plus-fragments split, or null when
+ * no such block exists or the keyword structure is malformed (stray
+ * do/done/then/fi, unclosed block) — the caller then keeps its fail-closed
+ * parse handling. Keywords inside quotes, escapes, comments, or
+ * $(…)/(…)/${…} substitutions are not block keywords.
+ */
+function splitNestedCompoundBlocks(
+	command: string,
+): NestedCompoundBlockSplit | null {
+	const stack: CompoundStackEntry[] = [];
+	const bodySpans: Array<[number, number]> = [];
+
+	const matchKeyword = (rest: string): string | null => {
+		for (const keyword of [
+			'do',
+			'done',
+			'if',
+			'then',
+			'elif',
+			'else',
+			'fi',
+			'for',
+			'while',
+			'until',
+		]) {
+			if (
+				rest.startsWith(keyword) &&
+				isKeywordBoundaryChar(rest[keyword.length])
+			) {
+				return keyword;
+			}
+		}
+		return null;
+	};
+
+	const malformed = (): null => {
+		stack.length = 0;
+		bodySpans.length = 0;
+		return null;
+	};
+
+	const handleKeyword = (
+		keyword: string,
+		start: number,
+		end: number,
+	): boolean => {
+		const top = stack[stack.length - 1];
+		switch (keyword) {
+			case 'for':
+			case 'while':
+			case 'until':
+				stack.push({ type: 'loopHead' });
+				return true;
+			case 'do':
+				if (!top || top.type !== 'loopHead') return false;
+				stack[stack.length - 1] = { type: 'loopBody', bodyStart: end };
+				return true;
+			case 'done':
+				if (!top || top.type !== 'loopBody') return false;
+				bodySpans.push([top.bodyStart, start]);
+				stack.pop();
+				return true;
+			case 'if':
+				stack.push({ type: 'ifHead' });
+				return true;
+			case 'then':
+				if (!top || top.type !== 'ifHead') return false;
+				stack[stack.length - 1] = { type: 'ifBranch', branchStarts: [end] };
+				return true;
+			case 'elif':
+			case 'else':
+				if (!top || top.type !== 'ifBranch' || top.branchStarts.length === 0)
+					return false;
+				bodySpans.push([top.branchStarts[top.branchStarts.length - 1], start]);
+				top.branchStarts.push(end);
+				return true;
+			case 'fi':
+				if (!top || top.type !== 'ifBranch' || top.branchStarts.length === 0)
+					return false;
+				bodySpans.push([top.branchStarts[top.branchStarts.length - 1], start]);
+				stack.pop();
+				return true;
+			default:
+				return true;
+		}
+	};
+
+	let inSingle = false;
+	let inDouble = false;
+	let escaped = false;
+	let substDepth = 0;
+	let atWordStart = true;
+
+	for (let i = 0; i < command.length; i += 1) {
+		const char = command[i];
+		if (escaped) {
+			escaped = false;
+			atWordStart = false;
+			continue;
+		}
+		if (char === '\\' && !inSingle) {
+			escaped = true;
+			atWordStart = false;
+			continue;
+		}
+		if (inSingle) {
+			if (char === "'") inSingle = false;
+			continue;
+		}
+		if (inDouble) {
+			if (char === '"') inDouble = false;
+			continue;
+		}
+		if (char === "'") {
+			inSingle = true;
+			atWordStart = false;
+			continue;
+		}
+		if (char === '"') {
+			inDouble = true;
+			atWordStart = false;
+			continue;
+		}
+		if (char === '#' && atWordStart) {
+			while (i < command.length && command[i] !== '\n') i += 1;
+			atWordStart = true;
+			continue;
+		}
+		if (char === '$' && (command[i + 1] === '(' || command[i + 1] === '{')) {
+			substDepth += 1;
+			i += 1;
+			atWordStart = false;
+			continue;
+		}
+		if (char === '(') {
+			substDepth += 1;
+			atWordStart = false;
+			continue;
+		}
+		if (char === ')' || char === '}') {
+			if (substDepth > 0) substDepth -= 1;
+			atWordStart = false;
+			continue;
+		}
+		if (/\s/.test(char) || ';|&<>'.includes(char)) {
+			atWordStart = true;
+			continue;
+		}
+		if (atWordStart && substDepth === 0) {
+			const keyword = matchKeyword(command.slice(i));
+			if (keyword) {
+				if (!handleKeyword(keyword, i, i + keyword.length)) {
+					return malformed();
+				}
+				i += keyword.length - 1;
+				atWordStart = false;
+				continue;
+			}
+		}
+		atWordStart = false;
+	}
+
+	// Malformed keyword structure (stray do/done/then/fi, unclosed block):
+	// keep the fail-closed parse handling instead of guessing a split.
+	if (stack.length > 0) return null;
+
+	const qualifying = bodySpans.filter(
+		([start, end]) =>
+			end > start && containsNestedCompoundKeyword(command.slice(start, end)),
+	);
+	if (qualifying.length === 0) return null;
+
+	// Keep only OUTERMOST qualifying spans: a qualifying span nested inside
+	// another qualifying span is already covered by it, and splicing both
+	// would apply stale offsets to the inner one.
+	const outermost = qualifying.filter(
+		([start, end]) =>
+			!qualifying.some(
+				([otherStart, otherEnd]) =>
+					otherStart < start &&
+					otherEnd >= end &&
+					!(otherStart === start && otherEnd === end),
+			),
+	);
+
+	// Splice from the end so earlier offsets stay valid. The replacement is
+	// ` : ; ` (inert no-op PLUS separator) — the span's own trailing `;`/
+	// newline is inside the replaced region, so the skeleton needs its own
+	// separator before `done`/`elif`/`else`/`fi`.
+	const sorted = [...outermost].sort((left, right) => right[0] - left[0]);
+	let skeleton = command;
+	for (const [start, end] of sorted) {
+		skeleton = `${skeleton.slice(0, start)} : ; ${skeleton.slice(end)}`;
+	}
+	const bodies = outermost.map(([start, end]) =>
+		command.slice(start, end).trim(),
+	);
+	return { skeleton, bodies };
+}
+
+/**
+ * True when the text contains a compound keyword at a token boundary outside
+ * quotes/escapes/comments — the bash-parser grammar gap this decomposition
+ * exists for.
+ */
+function containsNestedCompoundKeyword(text: string): boolean {
+	let inSingle = false;
+	let inDouble = false;
+	let escaped = false;
+	let atWordStart = true;
+	for (let i = 0; i < text.length; i += 1) {
+		const char = text[i];
+		if (escaped) {
+			escaped = false;
+			atWordStart = false;
+			continue;
+		}
+		if (char === '\\' && !inSingle) {
+			escaped = true;
+			atWordStart = false;
+			continue;
+		}
+		if (inSingle) {
+			if (char === "'") inSingle = false;
+			continue;
+		}
+		if (inDouble) {
+			if (char === '"') inDouble = false;
+			continue;
+		}
+		if (char === "'") {
+			inSingle = true;
+			atWordStart = false;
+			continue;
+		}
+		if (char === '"') {
+			inDouble = true;
+			atWordStart = false;
+			continue;
+		}
+		if (char === '#' && atWordStart) {
+			while (i < text.length && text[i] !== '\n') i += 1;
+			atWordStart = true;
+			continue;
+		}
+		if (/\s/.test(char) || ';|&()<>'.includes(char)) {
+			atWordStart = true;
+			continue;
+		}
+		if (atWordStart) {
+			for (const keyword of NESTED_COMPOUND_KEYWORDS) {
+				if (
+					text.startsWith(keyword, i) &&
+					isKeywordBoundaryChar(text[i + keyword.length])
+				) {
+					return true;
+				}
+			}
+		}
+		atWordStart = false;
+	}
+	return false;
+}
+
 export function detectPosixWrites(
 	command: string,
 	procsubRecursionDepth = 0,
+	nestedCompoundSplitDepth = 0,
 ): WriteAnalysis {
 	if (!command || typeof command !== 'string') {
 		return { writes: [], hasWrites: false };
@@ -9499,6 +9821,83 @@ export function detectPosixWrites(
 	// now unconditionally (a partial-detector find no longer clears it).
 	let forceParseError = false;
 	let residualCommand: string | undefined;
+	if (parseFailed) {
+		// #3891-class grammar gap: bash-parser cannot parse compound
+		// statements nested inside a loop/if body. Decompose the block
+		// structurally (skeleton + body fragments, writes unioned — see
+		// splitNestedCompoundBlocks) BEFORE the procsub masking, so a command
+		// combining both shapes still resolves. Any piece failing to parse
+		// keeps the fail-closed parseError.
+		if (nestedCompoundSplitDepth < NESTED_COMPOUND_SPLIT_DEPTH_MAX) {
+			const split = splitNestedCompoundBlocks(command);
+			if (split) {
+				const skeletonAnalysis = detectPosixWrites(
+					split.skeleton,
+					procsubRecursionDepth,
+					nestedCompoundSplitDepth + 1,
+				);
+				const fragmentAnalyses = split.bodies.map((body) =>
+					detectPosixWrites(
+						body,
+						procsubRecursionDepth,
+						nestedCompoundSplitDepth + 1,
+					),
+				);
+				const allAnalyses = [skeletonAnalysis, ...fragmentAnalyses];
+				if (allAnalyses.every((analysis) => analysis.parseError !== true)) {
+					parseFailed = false;
+					// Directory-change withdrawal for the DECOMPOSED command
+					// (#2703-review F-001, mirroring procsubContextWithdraws'
+					// prefix-or-body rule). Two distinct orderings matter:
+					//
+					// 1. A directory-selection word in a BODY withdraws EVERY
+					//    write of the whole decomposed command — skeleton and
+					//    bodies alike. A loop/if body runs zero or more times,
+					//    possibly across several iterations, BETWEEN skeleton
+					//    statements, so no write has a statically provable
+					//    landing: a skeleton write after the block may land at
+					//    the post-body cwd (`for i in 1; do cd /etc; done;
+					//    echo x > hosts` writes /etc/hosts), and a body write
+					//    before its own cd still lands post-cd on the SECOND
+					//    iteration (`for i in 1 2; do echo x > f; cd /etc;
+					//    done`). The old skeleton-only check admitted both.
+					//
+					// 2. A directory-selection word in the SKELETON withdraws
+					//    only BODY writes: skeleton-internal cd→write order is
+					//    already handled by the skeleton analysis' own
+					//    recursive directory-state walk, but the bodies execute
+					//    inside that moved context and their analyses cannot
+					//    see it (the #3518 P-3 semantics).
+					//
+					// The local cwdNeutral stays false for the decomposed
+					// path, so the empty-directory-removal tag is stripped
+					// from every decomposed write below (conservative,
+					// fail-closed).
+					const skeletonCdContext = PROCSUB_CD_CONTEXT.test(split.skeleton);
+					const bodyCdContext = split.bodies.some((body) =>
+						PROCSUB_CD_CONTEXT.test(body),
+					);
+					for (const analysis of allAnalyses) {
+						unwrapDepthExceeded =
+							unwrapDepthExceeded || analysis.unwrapDepthExceeded === true;
+					}
+					for (let a = 0; a < allAnalyses.length; a += 1) {
+						const analysis = allAnalyses[a];
+						const isBody = a > 0;
+						const withdraw = bodyCdContext || (skeletonCdContext && isBody);
+						for (const write of analysis.writes) {
+							allWrites.push(
+								withdraw && write.unresolvedContext !== true
+									? { ...write, unresolvedContext: true }
+									: write,
+							);
+						}
+					}
+					residualCommand = split.skeleton;
+				}
+			}
+		}
+	}
 	if (parseFailed) {
 		const masked = maskProcSubSpans(command);
 		let maskedOk = false;

@@ -288,6 +288,11 @@ export const TOOL_METADATA = {
 			'prepare an auditable PR workflow checkout or restore its exact original branch/HEAD and preserved stash after terminal cleanup',
 		agents: ['architect'],
 	},
+	prune_communication_log: {
+		description:
+			'maintain the swarm communication debug log lifecycle: report the AI-release worklist, or remove one closed-but-unproven incident entry with an audited reason (closed incidents whose tasks are durably complete are pruned automatically)',
+		agents: ['architect'],
+	},
 	invalidate_pr_feedback_publication: {
 		description:
 			'invalidate the armed PR_FEEDBACK publication generation so approved content can change, superseding every content-dependent approval and reopening the exact scoped rework + fresh-review path (issue #2108)',

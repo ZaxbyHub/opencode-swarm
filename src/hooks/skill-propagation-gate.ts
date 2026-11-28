@@ -1373,8 +1373,30 @@ export async function skillPropagationGateBefore(
 
 	// Check if SKILLS field is present and not 'none'
 	const skillsLower = skillsValue.toLowerCase();
-	if (skillsValue && skillsLower !== 'none')
+	if (skillsValue && skillsLower !== 'none') {
+		// A present SKILLS value that validated zero file references took the
+		// inline-body recovery path (no path authority to validate) — record
+		// a bounded trace so a present-but-unmatched-looking SKILLS value
+		// leaves a distinguishable event instead of nothing at all.
+		if ((explicitIntegrity.validatedSkillPaths ?? []).length === 0) {
+			try {
+				_internals.writeWarnEvent(directory, {
+					type: 'skill_propagation_inline',
+					timestamp: new Date().toISOString(),
+					tool: toolName,
+					agent: agentRaw,
+					target_agent: parsed.targetAgent,
+					sessionID,
+					skills_field: 'inline_or_non_file',
+					inline_recovery: true,
+					available_skills: availableSkills,
+				});
+			} catch {
+				/* never block the tool path on the trace event */
+			}
+		}
 		return { blocked: false, reason: null, recommendedSkills: scored };
+	}
 
 	// Derive human-readable skill names from paths
 	const skillNames = availableSkills.map((p) => {
@@ -1399,6 +1421,12 @@ export async function skillPropagationGateBefore(
 			target_agent: parsed.targetAgent,
 			sessionID,
 			skills_missing: true,
+			// Distinguish the two omission flavors: the dispatch carried no
+			// SKILLS field at all ('omitted') vs. an explicit 'none'
+			// declaration ('none'). Referenced-but-invalid file references
+			// block earlier (validateExplicitSkillReferencesBefore), so this
+			// event never means "referenced skill failed to match".
+			skills_field: skillsValue ? 'none' : 'omitted',
 			available_skills: availableSkills,
 		});
 	} catch {

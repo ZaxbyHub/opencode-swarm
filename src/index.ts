@@ -4517,6 +4517,22 @@ async function initializeOpenCodeSwarm(
 												// observation only; the facts ring records it
 											}
 										}
+										// Communication debug-log lifecycle (the consumer-anchored
+										// "resolved entries are removed" policy, made programmatic):
+										// a closed/idle session is a listed maintenance trigger, so
+										// the same event prunes incident entries whose closure is
+										// durably provable (every named task's evidence complete).
+										// Bounded (1 MB read cap + mtime memo) and fail-open; unclear
+										// entries are NEVER auto-removed — they are the audited
+										// prune_communication_log tool's AI-release worklist.
+										try {
+											const { pruneCommunicationLog } = await import(
+												'./maintenance/communication-log.js'
+											);
+											await pruneCommunicationLog(bootstrapRoot);
+										} catch {
+											// fail-open: the log is prose, never control flow
+										}
 										// Issue #2045 crash recovery (blocking lanes): NOT gated
 										// on backgroundSubagentsEnabled — blocking dispatch_lanes
 										// runs regardless of that flag, so its only terminal-receipt

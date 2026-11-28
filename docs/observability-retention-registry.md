@@ -419,10 +419,11 @@ per row.
 | `impact-map` | .swarm/cache/impact-map.json | derived-rebuildable | rebuildable via buildImpactMap (:449-455); size bounded by repository file population (session-scoped) | full-file: rebuildable cache; stale entries rejected by mtime che… | untouched (cache/) | not a defect — this-gate |
 | `instruction-pairing-report` | .swarm/memory/instruction-pairing-report.json | derived-rebuildable | single file overwritten whole per command invocation — bounded by the paired task corpus (per-trigger) | write-only: n/a (operator-facing output; re-generated on demand) | untouched (disposable derived output) | not a defect — this-gate |
 
-### Category 8 — Close/reset, worktree, doctor, session, warnings/automation, skills (28 rows)
+### Category 8 — Close/reset, worktree, doctor, session, warnings/automation, skills (29 rows)
 
 | Row id | Path grammar | State class | Write limit (scope) | Read bound | Close policy | Disposition → owner |
 |---|---|---|---|---|---|---|
+| `swarm-communication-debug-log` | .swarm/swarm_communication_debug.md | governed-content | prune-only rewrites (file only shrinks); reads hard-fail above MAX_LOG_BYTES 1000000 (global) | full-file: single markdown file, 1 MB read cap | untouched — the consumer Swarm-Communication-Debug policy owns the file | retain by design — #3939 |
 | `close-archive-bundles` | .swarm/archive/swarm-{timestamp}-{suffix}/ | governed-content | one bundle per finalize; each bundle bounded by the per-session caps of its contents; NO … (per-trigger) | directory-scan: filename-only scans; contents never re-read | IS the close archive | retain by design — #2030 (merged) |
 | `reset-backups` | .swarm/reset-backups/{kind}-{timestamp}/ | governed-content | RESET_BACKUP_RETENTION 5 GLOBAL (:20, prune :125) (global) | write-only: n/a | untouched | not a defect — this-gate |
 | `worktree-status-owners` | Bounded merge-status, provisioning-owner/lifecycle, and recovery-authority/journal/credential stores under `.swarm/` | authoritative | hard global byte, entry, and file-count caps declared in the owning modules | directory-scan/indexed: bounded strict recovery scans | untouched (cross-session recovery state) | not a defect — this-gate; direct-file exemption (#2036) |

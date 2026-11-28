@@ -4138,6 +4138,13 @@ export function reserveStageBRouteEvidence(
 	if (!isValidTaskId(taskId)) return null;
 	if (!session.stageBRouteEvidence) session.stageBRouteEvidence = new Map();
 	const entries = session.stageBRouteEvidence.get(taskId) ?? [];
+	// 2026-11-25 (post-catch-22 accumulation wedge): the replacement key is
+	// the route IDENTITY, not the exact dispatch — a sanctioned re-dispatch
+	// (a recover_* opening) or an exact replay of the same deterministic
+	// dispatch tuple both re-earn the slot, and a legacy partial binding
+	// (no dispatch tuple) can only match another partial, never strip a
+	// dispatch-bound settlement of its tuple. See the merged #3919 for the
+	// fenced publication path this source now feeds.
 	const dispatchIdentity = (entry: ReviewRouteEvidence): string | null => {
 		if (
 			!entry.callId ||
