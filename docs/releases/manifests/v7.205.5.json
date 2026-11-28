@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.205.5",
+  "tagCommit": "15449152bc96872e4b873ebeae7bdfb1be74e0d4",
+  "targetCommitish": "15449152bc96872e4b873ebeae7bdfb1be74e0d4",
+  "releaseBodySha256": "c47030ed2d150d85626db71522d75704834cb9325aadae1e02d33220b0f6f68d",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3763-3772-durable-write-integrity.md",
+      "sha256": "d5a33809369f3225cdc5013f5a6019f7b5a5176237a6a360458a2120857b60d0"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/3888-worktree-lane-teardown-race.md",
+      "sha256": "f3bd9666f46a3a38412f0682327bd643e08b09ed1e351f7840fe4e9bc45112ba"
+    }
+  ]
+}
