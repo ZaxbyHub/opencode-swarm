@@ -707,7 +707,7 @@ Each entry below points at a release note in `docs/releases/` and the invariant(
   and the predicate suites that pin the `required_gates` conjunct at every
   site (`tests/unit/tools/update-task-status-exempt-te-gate.test.ts`,
   `tests/unit/tools/update-task-status-exempt-recovery.test.ts`). The release
-  fragment `docs/releases/pending/test-engineer-exempt-route-completeness-wedge.md`
+  history `docs/releases/v7.205.6.md`
   records the shipped behavior and the disclosed residual stuck state.
 - **Maps to AGENTS.md:** invariant 9 (guardrails/retry — the Stage-B route
   gate fails closed) and invariant 7 (test writing — each site is pinned by a
