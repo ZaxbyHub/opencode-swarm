@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.205.13](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.205.12...v7.205.13) (2026-11-28)
+
+
+### Bug Fixes
+
+* **background:** a directory-valued declared scope no longer settles background coder completions as dispatch_no_mutation ([30191de](https://github.com/ZaxbyHub/opencode-swarm/commit/30191de0ec17b921501d1361cf28054281e97bae))
+* repin census/registry citations to the merged tree + drop unused import ([3b08610](https://github.com/ZaxbyHub/opencode-swarm/commit/3b0861096895884de9bcd42efd24ed0b88b11c8e))
+* **skills:** add release fragment, pins, and issue-body data rule for swarm-pr-feedback amendment ([1bd69bc](https://github.com/ZaxbyHub/opencode-swarm/commit/1bd69bc28e19d589729271ef590cd63bfa9ad7cb))
+
 ## [7.205.12](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.205.11...v7.205.12) (2026-11-27)
 
 
