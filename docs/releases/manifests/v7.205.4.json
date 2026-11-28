@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.205.4",
+  "tagCommit": "890351ab505533ecbf4e6a3a13ef1db6012b77a6",
+  "targetCommitish": "890351ab505533ecbf4e6a3a13ef1db6012b77a6",
+  "releaseBodySha256": "f3747e6dd2968492a1bee97dfbce7a96cbabdc66695715b9ba3ad9c2306175a6",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3304-required-check-crlf-wording-erratum.md",
+      "sha256": "728cbc3dfd7f3aeef20c6d3da170f3c17247a1a786dc5c61650ea89e14157094"
+    },
+    {
+      "prNumber": null,
+      "order": 1,
+      "path": "docs/releases/pending/3889-scope-binding-lease-age-cap.md",
+      "sha256": "a1095c3316e9386d6a4e0fce4c27e76c703ca0bc79f38da5ee3ee3fa1bed6172"
+    },
+    {
+      "prNumber": null,
+      "order": 2,
+      "path": "docs/releases/pending/v2-pr-workflow-activation-refusal.md",
+      "sha256": "1bc73faddc7a93fd6fa0320317c8feb7e51abb47481f9446cd3ab01c29f53596"
+    }
+  ]
+}
