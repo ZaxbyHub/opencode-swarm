@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "tag": "v7.205.10",
+  "tagCommit": "17ebef6c7c26639b30b1d11ae9f98c56c0081067",
+  "targetCommitish": "17ebef6c7c26639b30b1d11ae9f98c56c0081067",
+  "releaseBodySha256": "64f84080405d1388d48de2d177d2c7a2793c008d429a5199d89072207fabd35a",
+  "fragments": [
+    {
+      "prNumber": null,
+      "order": 0,
+      "path": "docs/releases/pending/3934-ownerless-plan-lock-recovery.md",
+      "sha256": "6ab2347ad9c4c94e0955ae7cb63e149fa033e1118c4f871addf754a8d8900fe3"
+    }
+  ]
+}
