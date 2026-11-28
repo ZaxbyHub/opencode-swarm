@@ -32,6 +32,10 @@ describe('forceRecoverReworkTask (issue #2755)', () => {
 		resetSwarmState();
 		isolatedEnv = createIsolatedTestEnv();
 		({ dir: directory, cleanup } = createSafeTestDir('rework-recovery-'));
+		// Explicit project-root marker so assertProjectRoot accepts the temp
+		// dir even when a parent (e.g. the user profile) already carries
+		// .swarm/ state (host-dependent).
+		mkdirSync(path.join(directory, '.git'), { recursive: true });
 	});
 
 	afterEach(() => {

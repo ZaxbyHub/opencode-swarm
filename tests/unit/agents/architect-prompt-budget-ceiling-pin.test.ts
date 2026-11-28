@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { ARCHITECT_PROMPT_BUDGET_CHARS } from '../../../src/agents/architect';
 
 describe('architect prompt budget ceiling pin (PRR-013c)', () => {
-	test('the ceiling constant is pinned to the 165,500 literal', () => {
+	test('the ceiling constant is pinned to the 166,000 literal', () => {
 		// #3312/#3313 rebase bump: our honest-INCOMPLETE guidance + #3419's
 		// recovery guidance measured 164,188 together; +1,000 round-step per
 		// the documented precedent (#2703/#2971/#2946/#3315).
@@ -22,7 +22,10 @@ describe('architect prompt budget ceiling pin (PRR-013c)', () => {
 		// twice via the turbo command help (standard + lean lines); the
 		// prefixed feature-heavy cell measured 165,229, so the ceiling takes
 		// the same deliberate +500 step (#2971 precedent).
-		expect(ARCHITECT_PROMPT_BUDGET_CHARS).toBe(165_500);
+		// #3939 bump: the prune_communication_log architect tool joined the
+		// roster and the tool schema block; the prefixed feature-heavy cell
+		// measured 165553, so the ceiling takes the same +500 step.
+		expect(ARCHITECT_PROMPT_BUDGET_CHARS).toBe(166_000);
 	});
 
 	test('docs/configuration.md documents the same ceiling value', () => {

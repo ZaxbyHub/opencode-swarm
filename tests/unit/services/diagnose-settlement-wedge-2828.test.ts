@@ -66,14 +66,22 @@ describe('diagnose — settlement_wedge visibility (issue #2828)', () => {
 		expect(check?.detail).toContain('/swarm recover 2.2');
 	});
 
-	test('a receipts-less idle task stays informational (no fabricated wedge)', async () => {
+	// The requirements-receipt fallback made the chain-verified
+	// accepted_mutation transition a settlement fact, so the settleAt
+	// fixture is receipt-backed rather than receipts-less. Its bundles
+	// predate the receipt, so the wedge is real and the remediation must
+	// name the pre-check bar rather than promise a passing repair.
+	test('a receipt-backed idle task whose proof predates the receipt is a wedge naming the pre-check bar', async () => {
 		await settleAt(directory, '2.3', 'idle');
 		await writeGreenBundles(directory);
 
 		const data = await getDiagnoseData(directory);
 		const check = findCheck(data.checks, 'Coder Settlements');
 
-		expect(check?.status).toBe('✅');
-		expect(check?.detail).not.toContain('settlement_wedge');
+		expect(check?.status).toBe('⚠️');
+		expect(check?.detail).toContain('task 2.3 [settlement_wedge]');
+		expect(check?.detail).toContain('workflow at idle');
+		expect(check?.detail).toContain('run pre_check_batch first');
+		expect(check?.detail).toContain('/swarm recover 2.3');
 	});
 });

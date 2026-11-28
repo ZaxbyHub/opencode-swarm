@@ -238,10 +238,11 @@ describe('architect prompt budget matrix — issue #2671 acceptance', () => {
 			'x'.repeat(ARCHITECT_PROMPT_BUDGET_CHARS),
 		);
 		expect(over.withinBudget).toBe(false);
-		// 163000 -> 164000 -> 165000 -> 165500-char ceiling (#3315, #2946, then
-		// the #3312/#3313 rebase over #3419; #3914 raised it last for the
+		// 163000 -> 164000 -> 165000 -> 165500 -> 166000-char ceiling (#3315,
+		// #2946, then the #3312/#3313 rebase over #3419; #3914 for the
 		// planned-tasks turbo disclosure embedded twice in the turbo help —
-		// the prefixed feature-heavy cell measured 165229). The estimate pin derives from the imported ceiling so the
+		// cell 165229; #3939 for the prune_communication_log tool — cell
+		// 165553). The estimate pin derives from the imported ceiling so the
 		// suite stays green at both ends of a deliberate ceiling change while
 		// still biting any estimateModelTokens drift.
 		expect(over.tokenEstimate).toBe(
