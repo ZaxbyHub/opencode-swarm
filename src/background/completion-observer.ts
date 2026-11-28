@@ -66,9 +66,11 @@ import {
 	type DurableIngestionOutcome,
 	findDelegationForCompletion,
 	initializeTerminalCloseout,
+	isIngestionRedriveExhausted,
 	isTerminalCloseoutStepPending,
 	LEGACY_CODER_SETTLEMENT_PENDING_ADVISORY_MARKER,
 	type LegacyCoderSettlementTransfer,
+	MAX_INGESTION_REDRIVE_ATTEMPTS,
 	maintainBackgroundDelegations,
 	markLegacyCoderSettlementTransferPending,
 	markTerminalCloseoutStepCompleted,
@@ -449,6 +451,17 @@ export function createBackgroundCompletionObserver(opts: {
 				].includes(record.normalizedAgent)
 			) {
 				steps.push('pipeline_advisory');
+			}
+			// Layer 23 (the 3.8 evening wedge): the ingestion-claim set gets
+			// its own recoverable step — acked only when the ingestion commits
+			// durably, pending otherwise so the r13 re-drive machinery replays
+			// the trusted terminal and re-drives the ingestion at every
+			// maintenance pass instead of stranding the round.
+			if (
+				record.normalizedAgent === 'coder' ||
+				isBackgroundGateBearingRecord(record)
+			) {
+				steps.push('ingestion_commit');
 			}
 			// r14 audit repair (P0-3): the plan-critic approval snapshot is a
 			// recoverable closeout step of its own — but ONLY for a
@@ -1517,11 +1530,68 @@ export function createBackgroundCompletionObserver(opts: {
 				record.normalizedAgent === 'coder' ||
 				isBackgroundGateBearingRecord(record)
 			) {
+				if (isIngestionRedriveExhausted(record)) {
+					// F-002: the bounded re-drive is spent (deterministic ingestion
+					// failure). Give up VISIBLY: mark ingestion_commit failed
+					// (r14 P0-2: terminally closed with a reason, so the record
+					// drops out of the recovery set), close parent_advisory and context_map
+					// (the failed-apply arm closes similar steps), stop claiming — the record
+					// then ages and the stale sweep regains authority over it.
+					// Journal-gated: without a journal this pass the give-up is
+					// deferred to recovery instead of forging a fragment journal.
+					const exhaustedReason = `ingestion abandoned after ${MAX_INGESTION_REDRIVE_ATTEMPTS} failed attempts; re-dispatch the task if its result is still needed`;
+					logger.warn(
+						`[background] ingestion for ${record.correlationId} exhausted its re-drive budget; marking ingestion_commit failed`,
+					);
+					if (closeoutJournalReady) {
+						await markStepFailed(
+							directory,
+							record.correlationId,
+							terminal.eventId,
+							'ingestion_commit',
+							exhaustedReason,
+						);
+						await runCloseoutStep(
+							record,
+							terminal.eventId,
+							'parent_advisory',
+							parentAdvisoryEffect(
+								directory,
+								record,
+								terminal.eventId,
+								exhaustedReason,
+								putAdvisory,
+							),
+						);
+						await ackCloseoutStep(record, terminal.eventId, 'context_map');
+					}
+					return;
+				}
 				const ingestion = await claimDelegationIngestion(
 					directory,
 					record.correlationId,
 					{ claimantId: terminal.eventId },
 				);
+				if (ingestion?.disposition === 'consumed') {
+					// Layer 23: an earlier pass already committed this
+					// ingestion durably (a crash between commit and ack
+					// replays here) — ack the step so recovery stops
+					// re-driving the record. r14 (P0-2) journal contract:
+					// when the journal could not be established this pass,
+					// EVERY journal-gated ack is deferred to recovery (the
+					// re-drive re-initializes the journal and lands here
+					// again); acking into a missing journal would forge a
+					// fragment journal and drop the record from the
+					// recovery set.
+					if (closeoutJournalReady) {
+						await markStepCompleted(
+							directory,
+							record.correlationId,
+							terminal.eventId,
+							'ingestion_commit',
+						);
+					}
+				}
 				if (
 					ingestion?.disposition === 'claimed' ||
 					ingestion?.disposition === 'retry'
@@ -1624,6 +1694,23 @@ export function createBackgroundCompletionObserver(opts: {
 						(await findDelegationForCompletion(directory, record.correlationId))
 							?.record ?? record;
 					if (applied.ok || applied.consumed) {
+						// Layer 23: the ingestion committed durably (success or a
+						// terminal-negative outcome) — ack the step so recovery
+						// stops re-driving this record. Every failure arm above
+						// (null commit, unconfirmed claim, retryable commit)
+						// returns WITHOUT acking: the step stays pending and the
+						// next maintenance pass replays the trusted terminal.
+						// r14 (P0-2): the ack is journal-gated — a pass whose
+						// journal initialization failed defers it to recovery
+						// instead of forging a fragment journal.
+						if (closeoutJournalReady) {
+							await markStepCompleted(
+								directory,
+								record.correlationId,
+								terminal.eventId,
+								'ingestion_commit',
+							);
+						}
 						// #3509: the ONLY background retirement owner — the
 						// durable commit has CONFIRMED the consumed outcome
 						// (successful or terminal-negative), so the call-scoped
